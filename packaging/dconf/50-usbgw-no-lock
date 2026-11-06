@@ -1,0 +1,7 @@
+# The session is reached only through the gateway and RDP login, so GNOME's lock
+# is a redundant second prompt.
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+
+[org/gnome/desktop/lockdown]
+disable-lock-screen=true
