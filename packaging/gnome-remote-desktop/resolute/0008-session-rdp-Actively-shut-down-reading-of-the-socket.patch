@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20=C3=85dahl?= <jadahl@gmail.com>
+Date: Wed, 30 Sep 2026 21:45:03 +0200
+Subject: [PATCH] session/rdp: Actively shut down reading of the socket when
+ stopping
+
+If we don't call shutdown() on the socket file descriptor shutting down
+reading, we might not return any current recv() call in the socket
+thread until the remote peer disconnects from its end, so make sure we
+stop reading when stopping the session.
+
+Part-of: <https://gitlab.gnome.org/GNOME/gnome-remote-desktop/-/merge_requests/436>
+(cherry picked from commit d9f45019fc584a0f76c1ef26d76dc01aa0c318dc)
+(cherry picked from commit ced8c4aae884dba72c4489c8882b01a8329cb66c)
+---
+ src/grd-session-rdp.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/grd-session-rdp.c b/src/grd-session-rdp.c
+index db8e3ed..0046913 100644
+--- a/src/grd-session-rdp.c
++++ b/src/grd-session-rdp.c
+@@ -1895,7 +1895,10 @@ grd_session_rdp_stop (GrdSession *session)
+   g_clear_object (&rdp_peer_context->urbdrc);
+   g_mutex_unlock (&rdp_peer_context->channel_mutex);
+ 
++  g_socket_shutdown (g_socket_connection_get_socket (session_rdp->connection),
++                     TRUE, FALSE, NULL);
+   g_clear_pointer (&session_rdp->socket_thread, g_thread_join);
++
+   g_clear_handle_id (&session_rdp->notify_post_connected_source_id,
+                      g_source_remove);
+ 

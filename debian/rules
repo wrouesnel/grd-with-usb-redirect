@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_install:
+	install -D -m 0755 headless-session/grd-headless-session \
+	  debian/grd-headless-session/usr/sbin/grd-headless-session
+	install -D -m 0755 headless-session/grd-ensure-tls-cert \
+	  debian/grd-headless-session/usr/libexec/grd-with-usb-redirect/grd-ensure-tls-cert
+	install -D -m 0644 headless-session/gnome-remote-desktop-headless.service.d/50-grd-tls-cert.conf \
+	  debian/grd-headless-session/usr/lib/systemd/user/gnome-remote-desktop-headless.service.d/50-grd-tls-cert.conf
+	install -D -m 0644 no-lockscreen/50-grd-no-lockscreen \
+	  debian/grd-no-lockscreen/etc/dconf/db/local.d/50-grd-no-lockscreen
+	install -D -m 0644 no-lockscreen/50-grd-no-lockscreen.locks \
+	  debian/grd-no-lockscreen/etc/dconf/db/local.d/locks/50-grd-no-lockscreen
+	install -D -m 0644 no-lockscreen/user.profile \
+	  debian/grd-no-lockscreen/etc/dconf/profile/user

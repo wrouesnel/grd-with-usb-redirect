@@ -1,0 +1,185 @@
+From 5021c7e3d34f964889eeb22eadc2668b0848bc0c Mon Sep 17 00:00:00 2001
+From: Joan Torres <joantolo@redhat.com>
+Date: Thu, 15 May 2025 17:27:07 +0200
+Subject: [PATCH] display-factories: Some small cleanups
+
+- Make the naming style of creator funcs the same.
+- Make private local_display_factory_create_display func.
+- Remove on remote factory unused display status changed callback.
+- Return dbus method invocation enum on dbus handlers.
+
+Part-of: <https://gitlab.gnome.org/GNOME/gdm/-/merge_requests/288>
+---
+ daemon/gdm-local-display-factory.c  | 52 +++++++++++++----------------
+ daemon/gdm-local-display-factory.h  |  3 --
+ daemon/gdm-remote-display-factory.c | 27 +++------------
+ 3 files changed, 29 insertions(+), 53 deletions(-)
+
+diff --git a/daemon/gdm-local-display-factory.c b/daemon/gdm-local-display-factory.c
+index 94515be..6f9fc12 100644
+--- a/daemon/gdm-local-display-factory.c
++++ b/daemon/gdm-local-display-factory.c
+@@ -366,21 +366,16 @@ store_display (GdmLocalDisplayFactory *factory,
+   /org/gnome/DisplayManager/Manager \
+   org.gnome.DisplayManager.Manager.GetDisplays
+ */
+-gboolean
+-gdm_local_display_factory_create_transient_display (GdmLocalDisplayFactory *factory,
+-                                                    char                  **id,
+-                                                    GError                **error)
++static gboolean
++gdm_local_display_factory_create_display (GdmLocalDisplayFactory  *factory,
++                                          char                   **id,
++                                          GError                 **error)
+ {
+-        gboolean         ret;
+-        GdmDisplay      *display = NULL;
+-        gboolean         is_initial = FALSE;
++        gboolean is_initial = FALSE;
++        g_autoptr (GdmDisplay) display = NULL;
+         g_autofree gchar *preferred_display_server = NULL;
+ 
+-        g_return_val_if_fail (GDM_IS_LOCAL_DISPLAY_FACTORY (factory), FALSE);
+-
+-        ret = FALSE;
+-
+-        g_debug ("GdmLocalDisplayFactory: Creating transient display");
++        g_debug ("GdmLocalDisplayFactory: Creating local display");
+ 
+         preferred_display_server = get_preferred_display_server (factory);
+ 
+@@ -433,22 +428,23 @@ gdm_local_display_factory_create_transient_display (GdmLocalDisplayFactory *fact
+ 
+         store_display (factory, display);
+ 
+-        if (! gdm_display_manage (display)) {
+-                display = NULL;
+-                goto out;
++        if (!gdm_display_manage (display)) {
++                g_set_error_literal (error,
++                                     GDM_DISPLAY_ERROR,
++                                     GDM_DISPLAY_ERROR_GENERAL,
++                                     "Failed managing display");
++                return FALSE;
+         }
+ 
+-        if (! gdm_display_get_id (display, id, NULL)) {
+-                display = NULL;
+-                goto out;
++        if (!gdm_display_get_id (display, id, NULL)) {
++                g_set_error_literal (error,
++                                     GDM_DISPLAY_ERROR,
++                                     GDM_DISPLAY_ERROR_GENERAL,
++                                     "Failed getting display id");
++                return FALSE;
+         }
+ 
+-        ret = TRUE;
+- out:
+-        /* ref either held by store or not at all */
+-        g_object_unref (display);
+-
+-        return ret;
++        return TRUE;
+ }
+ 
+ static void
+@@ -1574,16 +1570,16 @@ handle_create_transient_display (GdmDBusLocalDisplayFactory *skeleton,
+         g_autofree char *id = NULL;
+         gboolean created;
+ 
+-        created = gdm_local_display_factory_create_transient_display (factory,
+-                                                                      &id,
+-                                                                      &error);
++        created = gdm_local_display_factory_create_display (factory,
++                                                            &id,
++                                                            &error);
+         if (!created) {
+                 g_dbus_method_invocation_return_gerror (invocation, error);
+         } else {
+                 gdm_dbus_local_display_factory_complete_create_transient_display (skeleton, invocation, id);
+         }
+ 
+-        return TRUE;
++        return G_DBUS_METHOD_INVOCATION_HANDLED;
+ }
+ 
+ static gboolean
+diff --git a/daemon/gdm-local-display-factory.h b/daemon/gdm-local-display-factory.h
+index 49c7140..63da3c6 100644
+--- a/daemon/gdm-local-display-factory.h
++++ b/daemon/gdm-local-display-factory.h
+@@ -43,9 +43,6 @@ GQuark                     gdm_local_display_factory_error_quark              (v
+ 
+ GdmLocalDisplayFactory *   gdm_local_display_factory_new                      (GdmDisplayStore        *display_store);
+ 
+-gboolean                   gdm_local_display_factory_create_transient_display (GdmLocalDisplayFactory *factory,
+-                                                                               char                  **id,
+-                                                                               GError                **error);
+ G_END_DECLS
+ 
+ #endif /* __GDM_LOCAL_DISPLAY_FACTORY_H */
+diff --git a/daemon/gdm-remote-display-factory.c b/daemon/gdm-remote-display-factory.c
+index 0e47e96..30256d0 100644
+--- a/daemon/gdm-remote-display-factory.c
++++ b/daemon/gdm-remote-display-factory.c
+@@ -47,20 +47,11 @@ static gpointer remote_display_factory_object = NULL;
+ 
+ G_DEFINE_TYPE (GdmRemoteDisplayFactory, gdm_remote_display_factory, GDM_TYPE_DISPLAY_FACTORY)
+ 
+-static void
+-on_display_status_changed (GdmDisplay              *display,
+-                           GParamSpec              *arg1,
+-                           GdmRemoteDisplayFactory *factory)
+-{
+-        g_debug ("GdmRemoteDisplayFactory: remote display status changed: %d",
+-                 gdm_display_get_status (display));
+-}
+-
+ static gboolean
+-gdm_remote_display_factory_create_remote_display (GdmRemoteDisplayFactory *factory,
+-                                                  const char              *remote_id)
++gdm_remote_display_factory_create_display (GdmRemoteDisplayFactory *factory,
++                                           const char              *remote_id)
+ {
+-        GdmDisplay      *display  = NULL;
++        g_autoptr (GdmDisplay) display = NULL;
+         GdmDisplayStore *store;
+ 
+         g_debug ("GdmRemoteDisplayFactory: Creating remote display");
+@@ -72,17 +63,9 @@ gdm_remote_display_factory_create_remote_display (GdmRemoteDisplayFactory *facto
+ 
+         if (!gdm_display_prepare (display)) {
+                 gdm_display_unmanage (display);
+-                g_object_unref (display);
+                 return FALSE;
+         }
+ 
+-        g_signal_connect_after (display,
+-                                "notify::status",
+-                                G_CALLBACK (on_display_status_changed),
+-                                factory);
+-
+-        g_object_unref (display);
+-
+         return TRUE;
+ }
+ 
+@@ -92,7 +75,7 @@ handle_create_remote_display (GdmDBusRemoteDisplayFactory *skeleton,
+                               const char                  *remote_id,
+                               GdmRemoteDisplayFactory     *factory)
+ {
+-        if (!gdm_remote_display_factory_create_remote_display (factory, remote_id))
++        if (!gdm_remote_display_factory_create_display (factory, remote_id))
+                 g_dbus_method_invocation_return_error_literal (invocation,
+                                                                G_DBUS_ERROR,
+                                                                G_DBUS_ERROR_FAILED,
+@@ -101,7 +84,7 @@ handle_create_remote_display (GdmDBusRemoteDisplayFactory *skeleton,
+                 gdm_dbus_remote_display_factory_complete_create_remote_display (factory->skeleton,
+                                                                                 invocation);
+ 
+-        return TRUE;
++        return G_DBUS_METHOD_INVOCATION_HANDLED;
+ }
+ 
+ static gboolean

@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Will Rouesnel <wrouesnel@wrouesnel.com>
+Date: Thu, 19 Nov 2026 23:45:46 +1100
+Subject: [PATCH] ctl: Don't crash when the gnome-remote-desktop user doesn't
+ exist
+
+grdctl looks up the gnome-remote-desktop system user to tell whether
+it's running as the system daemon's user, and dereferenced the result
+without checking it.
+
+Build environments often don't have that user, so the grdctl test
+crashed there.
+
+Treat a missing user as not running as it.
+
+(cherry picked from commit deb332fd591cb4230c93b7477499ad8855531c6e)
+---
+ src/grd-ctl.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/grd-ctl.c b/src/grd-ctl.c
+index 2186e8f..9b2f486 100644
+--- a/src/grd-ctl.c
++++ b/src/grd-ctl.c
+@@ -1184,7 +1184,7 @@ main (int   argc,
+     }
+ 
+   pw = getpwnam (GRD_USERNAME);
+-  if (geteuid () == pw->pw_uid)
++  if (pw && geteuid () == pw->pw_uid)
+     runtime_mode = GRD_RUNTIME_MODE_SYSTEM;
+ 
+   settings = create_settings (runtime_mode);

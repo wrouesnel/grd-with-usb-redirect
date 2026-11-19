@@ -1,0 +1,15 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: grd-with-usb-redirect
+Source: https://github.com/wrouesnel/grd-with-usb-redirect
+
+Files: *
+Copyright: grd-with-usb-redirect contributors
+License: Apache-2.0 or MIT
+
+License: Apache-2.0 or MIT
+ Licensed under either of the Apache License, Version 2.0, or the MIT
+ license, at your option.
+ .
+ On Debian systems, the Apache License 2.0 is in
+ /usr/share/common-licenses/Apache-2.0. The MIT license is in LICENSE-MIT in
+ the source.

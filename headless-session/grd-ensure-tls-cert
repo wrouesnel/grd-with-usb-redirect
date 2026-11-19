@@ -1,0 +1,48 @@
+#!/bin/sh
+# Gives the user's headless gnome-remote-desktop a self-signed TLS certificate
+# for this machine, the way Windows does for Remote Desktop. Runs as the user,
+# before gnome-remote-desktop-headless.service starts.
+#
+# It makes a new certificate when there isn't one, when it expires within 30
+# days, or when the machine's name has changed. Then it points
+# gnome-remote-desktop at it. A certificate the user configured somewhere else
+# is left alone.
+set -eu
+
+dir=${XDG_DATA_HOME:-$HOME/.local/share}/gnome-remote-desktop
+key=$dir/rdp-tls.key
+cert=$dir/rdp-tls.crt
+name=$(hostname -f 2>/dev/null || hostname)
+short=$(hostname -s 2>/dev/null || hostname)
+
+configured() {
+    grdctl --headless status 2>/dev/null | sed -n "s/^[[:space:]]*TLS $1: //p"
+}
+
+current_cert=$(configured certificate)
+current_key=$(configured key)
+case "$current_cert" in
+    "" | "(empty)" | "$cert") ;;
+    *) exit 0 ;;
+esac
+
+if [ ! -s "$key" ] || [ ! -s "$cert" ] ||
+   ! openssl x509 -in "$cert" -noout -checkend 2592000 >/dev/null 2>&1 ||
+   [ "$(openssl x509 -in "$cert" -noout -subject -nameopt multiline 2>/dev/null |
+        sed -n 's/^[[:space:]]*commonName[[:space:]]*= //p')" != "$name" ]; then
+    mkdir -p "$dir"
+    umask 077
+    san="DNS:$name"
+    [ "$short" = "$name" ] || san="$san,DNS:$short"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -sha256 \
+        -subj "/CN=$name" -addext "subjectAltName=$san" \
+        -addext "extendedKeyUsage=serverAuth" \
+        -keyout "$key.new" -out "$cert.new" 2>/dev/null
+    mv "$key.new" "$key"
+    mv "$cert.new" "$cert"
+    echo "Made a self-signed TLS certificate for $name"
+    current_cert= current_key=
+fi
+
+[ "$current_key" = "$key" ] || grdctl --headless rdp set-tls-key "$key"
+[ "$current_cert" = "$cert" ] || grdctl --headless rdp set-tls-cert "$cert"

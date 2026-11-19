@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20=C3=85dahl?= <jadahl@gmail.com>
+Date: Wed, 30 Sep 2026 23:35:46 +0200
+Subject: [PATCH] session/vnc: Add server back pointer
+
+Part-of: <https://gitlab.gnome.org/GNOME/gnome-remote-desktop/-/merge_requests/436>
+(cherry picked from commit 71502c97db828ff28bde5925d427db45b22bfff4)
+(cherry picked from commit 35c156cc00b4bf6b97d9ad79b1c149032ad40573)
+---
+ src/grd-session-vnc.c | 10 ++++++++++
+ src/grd-session-vnc.h |  2 ++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/src/grd-session-vnc.c b/src/grd-session-vnc.c
+index 1f49000..377d769 100644
+--- a/src/grd-session-vnc.c
++++ b/src/grd-session-vnc.c
+@@ -47,6 +47,8 @@ struct _GrdSessionVnc
+ {
+   GrdSession parent;
+ 
++  GrdVncServer *server;
++
+   GSocketConnection *connection;
+   GSource *source;
+   rfbScreenInfoPtr rfb_screen;
+@@ -626,6 +628,13 @@ grd_session_vnc_get_stride_for_width (GrdSessionVnc *session_vnc,
+                                       int            width)
+ {
+   return width * BGRX_BYTES_PER_PIXEL;
++
++}
++
++GrdVncServer *
++grd_session_vnc_get_server (GrdSessionVnc *session_vnc)
++{
++  return session_vnc->server;
+ }
+ 
+ static void
+@@ -793,6 +802,7 @@ grd_session_vnc_new (GrdVncServer      *vnc_server,
+                               "context", context,
+                               NULL);
+ 
++  session_vnc->server = vnc_server;
+   session_vnc->connection = g_object_ref (connection);
+ 
+   settings = grd_context_get_settings (context);
+diff --git a/src/grd-session-vnc.h b/src/grd-session-vnc.h
+index cba7e3e..d501950 100644
+--- a/src/grd-session-vnc.h
++++ b/src/grd-session-vnc.h
+@@ -65,3 +65,5 @@ int grd_session_vnc_get_stride_for_width (GrdSessionVnc *session_vnc,
+ gboolean grd_session_vnc_is_client_gone (GrdSessionVnc *session_vnc);
+ 
+ void grd_session_vnc_notify_error (GrdSessionVnc *session_vnc);
++
++GrdVncServer * grd_session_vnc_get_server (GrdSessionVnc *session_vnc);

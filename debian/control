@@ -1,0 +1,56 @@
+Source: grd-with-usb-redirect
+Section: gnome
+Priority: optional
+Maintainer: Will Rouesnel <wrouesnel@wrouesnel.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Homepage: https://github.com/wrouesnel/grd-with-usb-redirect
+Vcs-Git: https://github.com/wrouesnel/grd-with-usb-redirect.git
+Vcs-Browser: https://github.com/wrouesnel/grd-with-usb-redirect
+Rules-Requires-Root: no
+
+Package: grd-with-usb-redirect
+Architecture: all
+Depends: rdp-usb-gw,
+         gnome-remote-desktop-urbdrc,
+         grd-headless-session (= ${source:Version}),
+         ${misc:Depends}
+Recommends: grd-no-lockscreen (= ${source:Version})
+Description: GNOME remote desktop with USB redirection, for RDP gateways
+ Installs everything for persistent headless GNOME desktops that RDP clients
+ reach directly, such as through an RDP gateway, with the client's USB
+ devices redirected to the desktop:
+  - rdp-usb-gw, the USB redirection daemon
+  - a gnome-remote-desktop build that lends rdp-usb-gw the session's USB
+    redirection channel
+  - grd-headless-session, to start a user's session at boot
+  - grd-no-lockscreen, to turn off GNOME's lock screen
+
+Package: grd-headless-session
+Architecture: all
+Depends: gnome-remote-desktop,
+         gnome-remote-desktop (>= 47~) | grdctl-credentials-stdin,
+         gdm3 (>= 50~) | gdm-new-session,
+         openssl,
+         passwd,
+         systemd,
+         util-linux,
+         ${misc:Depends}
+Description: persistent headless GNOME sessions reachable over RDP
+ grd-headless-session sets up a user's headless GNOME session to start at
+ boot and keep running when the RDP client disconnects, like a Windows Remote
+ Desktop session. RDP clients connect straight to it with gnome-remote-desktop,
+ without going through a login screen.
+ .
+ Each session gets a self-signed TLS certificate for the machine's name,
+ renewed when it nears expiry or the name changes.
+
+Package: grd-no-lockscreen
+Architecture: all
+Depends: dconf-cli, ${misc:Depends}
+Description: turn off GNOME's lock screen for remote sessions
+ Sets and locks GNOME's settings so sessions never lock. For desktops reached
+ through an RDP login, where the lock screen would be a second password
+ prompt, and in a headless session there is no console to unlock it from.
+ .
+ This applies to every user on the machine.

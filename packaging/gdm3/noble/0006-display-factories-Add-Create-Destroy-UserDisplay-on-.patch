@@ -1,0 +1,641 @@
+From f2a1b00e831ea4a5c5ba08868d98dfe0d0bd7044 Mon Sep 17 00:00:00 2001
+From: Joan Torres <joantolo@redhat.com>
+Date: Thu, 15 May 2025 17:34:20 +0200
+Subject: [PATCH] display-factories: Add <Create/Destroy>UserDisplay on its
+ dbus ifaces
+
+This allows creating or destroying a graphical user session either locally or
+headlessly.
+
+It uses a polkit policy to allow only processes in GDM group to call
+these methods.
+
+In next commits the policy rule will be enhanced to only authorize processes
+in GDM group running from specific systemd system units.
+
+Part-of: <https://gitlab.gnome.org/GNOME/gdm/-/merge_requests/288>
+---
+ daemon/gdm-display-factory.c          | 171 ++++++++++++++++++++++++++
+ daemon/gdm-display-factory.h          |   9 ++
+ daemon/gdm-local-display-factory.c    |  84 +++++++++++++
+ daemon/gdm-local-display-factory.xml  |   6 +
+ daemon/gdm-remote-display-factory.c   |  90 +++++++++++++-
+ daemon/gdm-remote-display-factory.xml |   6 +
+ daemon/meson.build                    |   1 +
+ data/meson.build                      |  14 +++
+ data/org.gnome.displaymanager.policy  |  20 +++
+ data/polkit-gdm.rules.in              |   8 ++
+ meson.build                           |   1 +
+ 11 files changed, 409 insertions(+), 1 deletion(-)
+ create mode 100644 data/org.gnome.displaymanager.policy
+ create mode 100644 data/polkit-gdm.rules.in
+
+diff --git a/daemon/gdm-display-factory.c b/daemon/gdm-display-factory.c
+index 8ff40ce..640db4a 100644
+--- a/daemon/gdm-display-factory.c
++++ b/daemon/gdm-display-factory.c
+@@ -26,14 +26,22 @@
+ #include <glib.h>
+ #include <glib/gi18n.h>
+ #include <glib-object.h>
++#include <polkit/polkit.h>
+ 
+ #include "gdm-display-factory.h"
++#include "gdm-common.h"
+ #include "gdm-display-store.h"
+ 
++#define GDM_DISPLAY_FACTORY_MANAGE_DISPLAYS_POLKIT_ACTION "org.gnome.displaymanager.displayfactory.manage-user-displays"
++
+ typedef struct _GdmDisplayFactoryPrivate
+ {
+         GdmDisplayStore *display_store;
+         guint            purge_displays_id;
++
++        GHashTable      *display_creation_users;
++
++       PolkitAuthority  *authority;
+ } GdmDisplayFactoryPrivate;
+ 
+ enum {
+@@ -142,6 +150,157 @@ gdm_display_factory_stop (GdmDisplayFactory *factory)
+         return ret;
+ }
+ 
++static gboolean
++ensure_polkit_authority (GdmDisplayFactory  *factory,
++                         GError            **error)
++{
++        GdmDisplayFactoryPrivate *priv;
++
++        priv = gdm_display_factory_get_instance_private (factory);
++
++        if (priv->authority)
++                return TRUE;
++
++        priv->authority = polkit_authority_get_sync (NULL, error);
++
++        return priv->authority != NULL;
++}
++
++gboolean
++gdm_display_factory_authorize_manage_user_displays (GdmDisplayFactory      *factory,
++                                                    GDBusMethodInvocation  *invocation,
++                                                    GError                **error)
++{
++        g_autoptr (PolkitAuthorizationResult) result = NULL;
++        g_autoptr (PolkitSubject) subject = NULL;
++        g_autoptr (GError) local_error = NULL;
++        const char *action;
++        const char *method;
++        const char *sender;
++        PolkitCheckAuthorizationFlags flags;
++        GdmDisplayFactoryPrivate *priv;
++
++        g_return_val_if_fail (GDM_IS_DISPLAY_FACTORY (factory), FALSE);
++
++        method = g_dbus_method_invocation_get_method_name (invocation);
++        if (g_strcmp0 (method, "CreateUserDisplay") != 0 &&
++            g_strcmp0 (method, "DestroyUserDisplay") != 0)
++                return TRUE;
++
++        if (!ensure_polkit_authority (factory, &local_error)) {
++                g_set_error (error, GDM_DISPLAY_ERROR, GDM_DISPLAY_ERROR_GENERAL,
++                             "Error getting polkit authority: %s",
++                             local_error->message);
++                return FALSE;
++        }
++
++        priv = gdm_display_factory_get_instance_private (factory);
++
++        sender = g_dbus_method_invocation_get_sender (invocation);
++        subject = polkit_system_bus_name_new (sender);
++        action = GDM_DISPLAY_FACTORY_MANAGE_DISPLAYS_POLKIT_ACTION;
++        flags = POLKIT_CHECK_AUTHORIZATION_FLAGS_ALLOW_USER_INTERACTION;
++        result = polkit_authority_check_authorization_sync (priv->authority,
++                                                            subject, action,
++                                                            NULL, flags, NULL,
++                                                            &local_error);
++        if (!result) {
++                g_set_error (error, GDM_DISPLAY_ERROR, GDM_DISPLAY_ERROR_GENERAL,
++                             "Failed to check authorization: %s",
++                             local_error->message);
++                return FALSE;
++        }
++
++        if (!polkit_authorization_result_get_is_authorized (result)) {
++                g_set_error (error, GDM_DISPLAY_ERROR, GDM_DISPLAY_ERROR_GENERAL,
++                             "Not authorized for action %s", action);
++                return FALSE;
++        }
++
++        return TRUE;
++}
++
++gboolean
++gdm_display_factory_on_user_display_creation (GdmDisplayFactory  *factory,
++                                              const char         *user,
++                                              GError            **error)
++{
++        g_auto (GStrv) sessions = NULL;
++        GdmDisplayFactoryPrivate *priv;
++
++        g_return_val_if_fail (GDM_IS_DISPLAY_FACTORY (factory), FALSE);
++
++        priv = gdm_display_factory_get_instance_private (factory);
++
++        if (g_hash_table_lookup (priv->display_creation_users, user) != NULL) {
++                g_set_error (error, GDM_DISPLAY_ERROR, GDM_DISPLAY_ERROR_GENERAL,
++                             "A display for user %s has already been created", user);
++                return FALSE;
++        }
++
++        if (!gdm_find_graphical_sessions_for_username (user, &sessions, error))
++                return FALSE;
++
++        if (g_strv_length (sessions) > 0) {
++                g_set_error (error, GDM_DISPLAY_ERROR, GDM_DISPLAY_ERROR_GENERAL,
++                             "There's already an opened session for user %s", user);
++                return FALSE;
++        }
++
++        g_hash_table_insert (priv->display_creation_users, g_strdup (user), NULL);
++
++        return TRUE;
++}
++
++gboolean
++gdm_display_factory_on_user_display_destruction (GdmDisplayFactory  *factory,
++                                                 const char         *user,
++                                                 GError            **error)
++{
++        g_auto (GStrv) session_ids = NULL;
++        g_autoptr (GError) local_error = NULL;
++        g_autoptr (GDBusConnection) connection = NULL;
++        GdmDisplayFactoryPrivate *priv;
++        int i;
++
++        g_return_val_if_fail (GDM_IS_DISPLAY_FACTORY (factory), FALSE);
++
++        priv = gdm_display_factory_get_instance_private (factory);
++
++        if (!g_hash_table_remove (priv->display_creation_users, user)) {
++                g_set_error (error, GDM_DISPLAY_ERROR, GDM_DISPLAY_ERROR_GENERAL,
++                             "A display for user %s wasn't created", user);
++                return FALSE;
++        }
++
++        if (!gdm_find_graphical_sessions_for_username (user, &session_ids, error))
++                return FALSE;
++
++        if (g_strv_length (session_ids) == 0) {
++                g_set_error (error, GDM_DISPLAY_ERROR, GDM_DISPLAY_ERROR_GENERAL,
++                             "There's no display for user %s", user);
++                return FALSE;
++        }
++
++        connection = g_bus_get_sync (G_BUS_TYPE_SYSTEM, NULL, &local_error);
++        if (connection == NULL) {
++                g_set_error (error, GDM_DISPLAY_ERROR, GDM_DISPLAY_ERROR_GENERAL,
++                             "Failed getting system bus %s", local_error->message);
++                return FALSE;
++        }
++
++        for (i = 0; session_ids[i] != NULL; i++) {
++                if (!gdm_terminate_session_by_id (connection, NULL, session_ids[i])) {
++                        g_set_error (error, GDM_DISPLAY_ERROR, GDM_DISPLAY_ERROR_GENERAL,
++                                     "Failed to terminate session %s",
++                                     session_ids[i]);
++                        return FALSE;
++                }
++        }
++
++        return TRUE;
++}
++
+ static void
+ gdm_display_factory_set_display_store (GdmDisplayFactory *factory,
+                                        GdmDisplayStore   *display_store)
+@@ -219,6 +378,14 @@ gdm_display_factory_class_init (GdmDisplayFactoryClass *klass)
+ static void
+ gdm_display_factory_init (GdmDisplayFactory *factory)
+ {
++        GdmDisplayFactoryPrivate *priv;
++
++        priv = gdm_display_factory_get_instance_private (factory);
++
++        priv->display_creation_users = g_hash_table_new_full (g_str_hash,
++                                                              g_str_equal,
++                                                              (GDestroyNotify) g_free,
++                                                              NULL);
+ }
+ 
+ static void
+@@ -235,7 +402,11 @@ gdm_display_factory_finalize (GObject *object)
+ 
+         g_return_if_fail (priv != NULL);
+ 
++        g_clear_pointer (&priv->display_creation_users, g_hash_table_destroy);
++
+         g_clear_handle_id (&priv->purge_displays_id, g_source_remove);
+ 
++        g_clear_object (&priv->authority);
++
+         G_OBJECT_CLASS (gdm_display_factory_parent_class)->finalize (object);
+ }
+diff --git a/daemon/gdm-display-factory.h b/daemon/gdm-display-factory.h
+index b17cb1c..afb2b0a 100644
+--- a/daemon/gdm-display-factory.h
++++ b/daemon/gdm-display-factory.h
+@@ -53,6 +53,15 @@ gboolean                   gdm_display_factory_start                   (GdmDispl
+ gboolean                   gdm_display_factory_stop                    (GdmDisplayFactory *manager);
+ GdmDisplayStore *          gdm_display_factory_get_display_store       (GdmDisplayFactory *manager);
+ void                       gdm_display_factory_queue_purge_displays    (GdmDisplayFactory *manager);
++gboolean                   gdm_display_factory_authorize_manage_user_displays (GdmDisplayFactory      *factory,
++                                                                               GDBusMethodInvocation  *invocation,
++                                                                               GError                **error);
++gboolean                   gdm_display_factory_on_user_display_creation (GdmDisplayFactory  *factory,
++                                                                         const char         *user,
++                                                                         GError            **error);
++gboolean                   gdm_display_factory_on_user_display_destruction (GdmDisplayFactory  *factory,
++                                                                            const char         *user,
++                                                                            GError            **error);
+ 
+ G_END_DECLS
+ 
+diff --git a/daemon/gdm-local-display-factory.c b/daemon/gdm-local-display-factory.c
+index 6f9fc12..c7a2080 100644
+--- a/daemon/gdm-local-display-factory.c
++++ b/daemon/gdm-local-display-factory.c
+@@ -368,6 +368,7 @@ store_display (GdmLocalDisplayFactory *factory,
+ */
+ static gboolean
+ gdm_local_display_factory_create_display (GdmLocalDisplayFactory  *factory,
++                                          const char              *autologin_user,
+                                           char                   **id,
+                                           GError                 **error)
+ {
+@@ -424,6 +425,7 @@ gdm_local_display_factory_create_display (GdmLocalDisplayFactory  *factory,
+                       "seat-id", "seat0",
+                       "allow-timed-login", FALSE,
+                       "is-initial", is_initial,
++                      "autologin-user", autologin_user,
+                       NULL);
+ 
+         store_display (factory, display);
+@@ -1571,6 +1573,7 @@ handle_create_transient_display (GdmDBusLocalDisplayFactory *skeleton,
+         gboolean created;
+ 
+         created = gdm_local_display_factory_create_display (factory,
++                                                            NULL,
+                                                             &id,
+                                                             &error);
+         if (!created) {
+@@ -1582,6 +1585,73 @@ handle_create_transient_display (GdmDBusLocalDisplayFactory *skeleton,
+         return G_DBUS_METHOD_INVOCATION_HANDLED;
+ }
+ 
++static gboolean
++handle_create_user_display (GdmDBusLocalDisplayFactory *skeleton,
++                            GDBusMethodInvocation      *invocation,
++                            const char                 *user,
++                            GdmLocalDisplayFactory     *factory)
++{
++        g_autoptr (GError) error = NULL;
++
++        if (!gdm_display_factory_on_user_display_creation (GDM_DISPLAY_FACTORY (factory),
++                                                           user,
++                                                           &error)) {
++                g_dbus_method_invocation_return_gerror (invocation, error);
++                return G_DBUS_METHOD_INVOCATION_HANDLED;
++        }
++
++        if (!gdm_local_display_factory_create_display (factory,
++                                                       user,
++                                                       NULL,
++                                                       &error)) {
++                g_dbus_method_invocation_return_gerror (invocation, error);
++                return G_DBUS_METHOD_INVOCATION_HANDLED;
++        }
++
++        gdm_dbus_local_display_factory_complete_create_user_display (skeleton,
++                                                                     invocation);
++
++        return G_DBUS_METHOD_INVOCATION_HANDLED;
++}
++
++static gboolean
++handle_destroy_user_display (GdmDBusLocalDisplayFactory *skeleton,
++                             GDBusMethodInvocation      *invocation,
++                             const char                 *user,
++                             GdmLocalDisplayFactory     *factory)
++{
++        g_autoptr (GError) error = NULL;
++
++        if (!gdm_display_factory_on_user_display_destruction (GDM_DISPLAY_FACTORY (factory),
++                                                              user,
++                                                              &error)) {
++                g_dbus_method_invocation_return_gerror (invocation, error);
++                return G_DBUS_METHOD_INVOCATION_HANDLED;
++        }
++
++        gdm_dbus_local_display_factory_complete_destroy_user_display (skeleton,
++                                                                      invocation);
++
++        return G_DBUS_METHOD_INVOCATION_HANDLED;
++}
++
++static gboolean
++on_authorize_method (GdmDBusLocalDisplayFactory *skeleton,
++                     GDBusMethodInvocation      *invocation,
++                     GdmLocalDisplayFactory     *factory)
++{
++        g_autoptr (GError) error = NULL;
++
++        if (!gdm_display_factory_authorize_manage_user_displays (GDM_DISPLAY_FACTORY (factory),
++                                                                 invocation,
++                                                                 &error)) {
++                g_dbus_method_invocation_return_gerror (invocation, error);
++                return FALSE;
++        }
++
++        return TRUE;
++}
++
+ static gboolean
+ register_factory (GdmLocalDisplayFactory *factory)
+ {
+@@ -1602,6 +1672,20 @@ register_factory (GdmLocalDisplayFactory *factory)
+                           G_CALLBACK (handle_create_transient_display),
+                           factory);
+ 
++        g_signal_connect (factory->skeleton,
++                          "handle-create-user-display",
++                          G_CALLBACK (handle_create_user_display),
++                          factory);
++
++        g_signal_connect (factory->skeleton,
++                          "handle-destroy-user-display",
++                          G_CALLBACK (handle_destroy_user_display),
++                          factory);
++
++        g_signal_connect (factory->skeleton, "g-authorize-method",
++                          G_CALLBACK (on_authorize_method),
++                          factory);
++
+         if (!g_dbus_interface_skeleton_export (G_DBUS_INTERFACE_SKELETON (factory->skeleton),
+                                                factory->connection,
+                                                GDM_LOCAL_DISPLAY_FACTORY_DBUS_PATH,
+diff --git a/daemon/gdm-local-display-factory.xml b/daemon/gdm-local-display-factory.xml
+index 515d991..2241bc4 100644
+--- a/daemon/gdm-local-display-factory.xml
++++ b/daemon/gdm-local-display-factory.xml
+@@ -4,5 +4,11 @@
+     <method name="CreateTransientDisplay">
+       <arg name="id" direction="out" type="o"/>
+     </method>
++    <method name="CreateUserDisplay">
++      <arg name="user" direction="in" type="s"/>
++    </method>
++    <method name="DestroyUserDisplay">
++      <arg name="user" direction="in" type="s"/>
++    </method>
+   </interface>
+ </node>
+diff --git a/daemon/gdm-remote-display-factory.c b/daemon/gdm-remote-display-factory.c
+index 30256d0..00a3bfc 100644
+--- a/daemon/gdm-remote-display-factory.c
++++ b/daemon/gdm-remote-display-factory.c
+@@ -20,6 +20,7 @@
+ 
+ #include "config.h"
+ 
++#include "gdm-common.h"
+ #include "gdm-remote-display.h"
+ #include "gdm-remote-display-factory.h"
+ #include "gdm-remote-display-factory-glue.h"
+@@ -49,6 +50,7 @@ G_DEFINE_TYPE (GdmRemoteDisplayFactory, gdm_remote_display_factory, GDM_TYPE_DIS
+ 
+ static gboolean
+ gdm_remote_display_factory_create_display (GdmRemoteDisplayFactory *factory,
++                                           const char              *autologin_user,
+                                            const char              *remote_id)
+ {
+         g_autoptr (GdmDisplay) display = NULL;
+@@ -58,6 +60,10 @@ gdm_remote_display_factory_create_display (GdmRemoteDisplayFactory *factory,
+ 
+         display = gdm_remote_display_new (remote_id);
+ 
++        g_object_set (display,
++                      "autologin-user", autologin_user,
++                      NULL);
++
+         store = gdm_display_factory_get_display_store (GDM_DISPLAY_FACTORY (factory));
+         gdm_display_store_add (store, display);
+ 
+@@ -75,7 +81,7 @@ handle_create_remote_display (GdmDBusRemoteDisplayFactory *skeleton,
+                               const char                  *remote_id,
+                               GdmRemoteDisplayFactory     *factory)
+ {
+-        if (!gdm_remote_display_factory_create_display (factory, remote_id))
++        if (!gdm_remote_display_factory_create_display (factory, NULL, remote_id))
+                 g_dbus_method_invocation_return_error_literal (invocation,
+                                                                G_DBUS_ERROR,
+                                                                G_DBUS_ERROR_FAILED,
+@@ -87,6 +93,74 @@ handle_create_remote_display (GdmDBusRemoteDisplayFactory *skeleton,
+         return G_DBUS_METHOD_INVOCATION_HANDLED;
+ }
+ 
++static gboolean
++handle_create_user_display (GdmDBusRemoteDisplayFactory *skeleton,
++                            GDBusMethodInvocation       *invocation,
++                            const char                  *user,
++                            GdmRemoteDisplayFactory     *factory)
++{
++        g_auto (GStrv) sessions = NULL;
++        g_autoptr (GError) error = NULL;
++
++        if (!gdm_display_factory_on_user_display_creation (GDM_DISPLAY_FACTORY (factory),
++                                                           user,
++                                                           &error)) {
++                g_dbus_method_invocation_return_gerror (invocation, error);
++                return G_DBUS_METHOD_INVOCATION_HANDLED;
++        }
++
++        if (!gdm_remote_display_factory_create_display (factory, user, NULL)) {
++                g_dbus_method_invocation_return_error (invocation,
++                                                       G_DBUS_ERROR,
++                                                       G_DBUS_ERROR_FAILED,
++                                                       "Error creating remote display");
++                return G_DBUS_METHOD_INVOCATION_HANDLED;
++        }
++
++        gdm_dbus_remote_display_factory_complete_create_user_display (factory->skeleton,
++                                                                      invocation);
++
++        return G_DBUS_METHOD_INVOCATION_HANDLED;
++}
++
++static gboolean
++handle_destroy_user_display (GdmDBusRemoteDisplayFactory *skeleton,
++                             GDBusMethodInvocation       *invocation,
++                             const char                  *user,
++                             GdmRemoteDisplayFactory     *factory)
++{
++        g_autoptr (GError) error = NULL;
++
++        if (!gdm_display_factory_on_user_display_destruction (GDM_DISPLAY_FACTORY (factory),
++                                                              user,
++                                                              &error)) {
++                g_dbus_method_invocation_return_gerror (invocation, error);
++                return G_DBUS_METHOD_INVOCATION_HANDLED;
++        }
++
++        gdm_dbus_remote_display_factory_complete_destroy_user_display (skeleton,
++                                                                       invocation);
++
++        return G_DBUS_METHOD_INVOCATION_HANDLED;
++}
++
++static gboolean
++on_authorize_method (GdmDBusRemoteDisplayFactory *skeleton,
++                     GDBusMethodInvocation       *invocation,
++                     GdmRemoteDisplayFactory     *factory)
++{
++        g_autoptr (GError) error = NULL;
++
++        if (!gdm_display_factory_authorize_manage_user_displays (GDM_DISPLAY_FACTORY (factory),
++                                                                 invocation,
++                                                                 &error)) {
++                g_dbus_method_invocation_return_gerror (invocation, error);
++                return FALSE;
++        }
++
++        return TRUE;
++}
++
+ static gboolean
+ register_factory (GdmRemoteDisplayFactory *factory)
+ {
+@@ -106,6 +180,20 @@ register_factory (GdmRemoteDisplayFactory *factory)
+                           G_CALLBACK (handle_create_remote_display),
+                           factory);
+ 
++        g_signal_connect (factory->skeleton,
++                          "handle-create-user-display",
++                          G_CALLBACK (handle_create_user_display),
++                          factory);
++
++        g_signal_connect (factory->skeleton,
++                          "handle-destroy-user-display",
++                          G_CALLBACK (handle_destroy_user_display),
++                          factory);
++
++        g_signal_connect (factory->skeleton, "g-authorize-method",
++                          G_CALLBACK (on_authorize_method),
++                          factory);
++
+         if (!g_dbus_interface_skeleton_export (G_DBUS_INTERFACE_SKELETON (factory->skeleton),
+                                                factory->connection,
+                                                GDM_REMOTE_DISPLAY_FACTORY_DBUS_PATH,
+diff --git a/daemon/gdm-remote-display-factory.xml b/daemon/gdm-remote-display-factory.xml
+index 84ce477..27cb9d1 100644
+--- a/daemon/gdm-remote-display-factory.xml
++++ b/daemon/gdm-remote-display-factory.xml
+@@ -4,5 +4,11 @@
+     <method name="CreateRemoteDisplay">
+       <arg name="remote_id" direction="in" type="o"/>
+     </method>
++    <method name="CreateUserDisplay">
++      <arg name="user" direction="in" type="s"/>
++    </method>
++    <method name="DestroyUserDisplay">
++      <arg name="user" direction="in" type="s"/>
++    </method>
+   </interface>
+ </node>
+diff --git a/daemon/meson.build b/daemon/meson.build
+index 7acb09a..0800480 100644
+--- a/daemon/meson.build
++++ b/daemon/meson.build
+@@ -74,6 +74,7 @@ gdm_daemon_deps = [
+   gio_unix_dep,
+   json_glib,
+   libpam_dep,
++  polkit_dep,
+   x_deps,
+   xcb_dep,
+ ]
+diff --git a/data/meson.build b/data/meson.build
+index 67f89ed..79233a7 100644
+--- a/data/meson.build
++++ b/data/meson.build
+@@ -226,3 +226,17 @@ if get_option('gdm-xsession')
+     install_dir: gdmconfdir,
+   )
+ endif
++ 
++# Polkit
++configure_file(
++  input: 'polkit-gdm.rules.in',
++  output: '20-gdm.rules',
++  configuration: {
++    'GDM_USERNAME': get_option('user'),
++  },
++  install_dir: get_option('datadir') / 'polkit-1' / 'rules.d',
++)
++install_data(
++  'org.gnome.displaymanager.policy',
++  install_dir: get_option('datadir') / 'polkit-1' / 'actions',
++)
+diff --git a/data/org.gnome.displaymanager.policy b/data/org.gnome.displaymanager.policy
+new file mode 100644
+index 0000000..e65da39
+--- /dev/null
++++ b/data/org.gnome.displaymanager.policy
+@@ -0,0 +1,20 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE policyconfig PUBLIC
++ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
++ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
++<policyconfig>
++
++  <vendor>The GNOME Project</vendor>
++  <vendor_url>http://www.gnome.org/</vendor_url>
++
++  <action id="org.gnome.displaymanager.displayfactory.manage-user-displays">
++    <description>Allow managing user sessions</description>
++    <message>Authentication is required to start or stop a user session</message>
++    <defaults>
++      <allow_any>auth_admin</allow_any>
++      <allow_inactive>auth_admin</allow_inactive>
++      <allow_active>auth_admin</allow_active>
++    </defaults>
++  </action>
++
++</policyconfig>
+diff --git a/data/polkit-gdm.rules.in b/data/polkit-gdm.rules.in
+new file mode 100644
+index 0000000..ee08036
+--- /dev/null
++++ b/data/polkit-gdm.rules.in
+@@ -0,0 +1,8 @@
++polkit.addRule(function(action, subject) {
++    if (subject.user !== "@GDM_USERNAME@")
++        return undefined;
++
++    if (action.id == "org.gnome.displaymanager.displayfactory.manage-user-displays") {
++        return polkit.Result.YES;
++    }
++});
+diff --git a/meson.build b/meson.build
+index 8c3d56f..fe2fdcf 100644
+--- a/meson.build
++++ b/meson.build
+@@ -68,6 +68,7 @@ accountsservice_dep = dependency('accountsservice', version: '>= 0.6.35')
+ xcb_dep = dependency('xcb')
+ keyutils_dep = dependency('libkeyutils', required: false)
+ libselinux_dep = dependency('libselinux', required: get_option('selinux'))
++polkit_dep = dependency('polkit-gobject-1')
+ 
+ # udev
+ if udev_dir == ''

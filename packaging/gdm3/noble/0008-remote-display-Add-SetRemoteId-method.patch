@@ -1,0 +1,75 @@
+From 2828d0833ac05b5443b04832bfa0d4d133e1daf3 Mon Sep 17 00:00:00 2001
+From: Joan Torres <joantolo@redhat.com>
+Date: Sun, 18 May 2025 20:52:35 +0200
+Subject: [PATCH] remote-display: Add SetRemoteId method
+
+Now accessing these created headless user sessions has two different ways:
+  1. Directly connecting to the gnome-remote-desktop daemon headless
+     which is connected to that user session, as explained in the
+     previous commit.
+  2. Through the remote login. i.e. connecting to the gnome-remote-desktop
+     system daemon that provides a headless login screen and after
+     authenticating, get that headless user session.
+
+To make the option 2 work, the system daemon needs to know the remote_id
+of the headless display to be able to do the handover from the login
+headless display to the user headless display.
+
+This allows the system daemon generate a valid remote_id and assign it to
+this new headless display.
+
+Part-of: <https://gitlab.gnome.org/GNOME/gdm/-/merge_requests/288>
+---
+ daemon/gdm-remote-display.c   | 18 ++++++++++++++++++
+ daemon/gdm-remote-display.xml |  3 +++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/daemon/gdm-remote-display.c b/daemon/gdm-remote-display.c
+index 8395462..0d243ff 100644
+--- a/daemon/gdm-remote-display.c
++++ b/daemon/gdm-remote-display.c
+@@ -60,6 +60,19 @@ gdm_remote_display_set_remote_id (GdmRemoteDisplay *display,
+         g_object_set (G_OBJECT (display->skeleton), "remote-id", remote_id, NULL);
+ }
+ 
++static gboolean
++handle_set_remote_id (GdmDBusRemoteDisplay    *skeleton,
++                      GDBusMethodInvocation   *invocation,
++                      const char              *remote_id,
++                      GdmRemoteDisplay        *display)
++{
++        g_object_set (G_OBJECT (display->skeleton), "remote-id", remote_id, NULL);
++
++        gdm_dbus_remote_display_complete_set_remote_id (skeleton, invocation);
++
++        return G_DBUS_METHOD_INVOCATION_HANDLED;
++}
++
+ static GObject *
+ gdm_remote_display_constructor (GType                  type,
+                                 guint                  n_construct_properties,
+@@ -78,6 +91,11 @@ gdm_remote_display_constructor (GType                  type,
+ 
+         g_object_bind_property (display, "session-id", display->skeleton, "session-id", G_BINDING_SYNC_CREATE);
+ 
++        g_signal_connect (display->skeleton,
++                          "handle-set-remote-id",
++                          G_CALLBACK (handle_set_remote_id),
++                          display);
++
+         return G_OBJECT (display);
+ }
+ 
+diff --git a/daemon/gdm-remote-display.xml b/daemon/gdm-remote-display.xml
+index 2fdf9ad..4d9542f 100644
+--- a/daemon/gdm-remote-display.xml
++++ b/daemon/gdm-remote-display.xml
+@@ -3,5 +3,8 @@
+   <interface name="org.gnome.DisplayManager.RemoteDisplay">
+     <property name="RemoteId" type="o" access="read"/>
+     <property name="SessionId" type="s" access="read"/>
++    <method name="SetRemoteId">
++      <arg name="remote_id" direction="in" type="o"/>
++    </method>
+   </interface>
+ </node>

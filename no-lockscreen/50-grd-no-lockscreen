@@ -1,0 +1,9 @@
+# From grd-no-lockscreen. Remote sessions are reached through an RDP login,
+# such as one behind an RDP gateway, so GNOME's lock screen would be a second
+# password prompt. It's also a trap: a headless session has no local console
+# to unlock it from.
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+
+[org/gnome/desktop/lockdown]
+disable-lock-screen=true

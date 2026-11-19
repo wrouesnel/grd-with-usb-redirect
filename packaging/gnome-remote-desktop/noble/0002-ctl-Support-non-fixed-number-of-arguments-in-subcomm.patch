@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ray Strode <rstrode@redhat.com>
+Date: Tue, 30 Apr 2024 09:36:53 -0400
+Subject: [PATCH] ctl: Support non-fixed number of arguments in subcommands
+
+At the moment, every subcommand is expected to have a predefined,
+fixed number of arguments.
+
+We need to lighten this expectation a bit to support subcommands
+that take data from either the command line or optionally the stdin.
+
+That is necessary to support more securely passing credentials
+(which will be implemented in a future commit).
+
+This commit, modifies the argument processing code to support multiple
+entries for the same subcommand, each entry with its separate allowed
+number of arguments. In this way, e.g., "set-credentials" will be able
+to support 0, 1 or 2 arguments.
+
+(cherry picked from commit 0f0826ea5285b309dca7174cdbd535f8b487b59a)
+(cherry picked from commit 579ae6157f17afc62d64d063aa4df9f137641422)
+---
+ src/grd-ctl.c | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/src/grd-ctl.c b/src/grd-ctl.c
+index 1923451..14973b3 100644
+--- a/src/grd-ctl.c
++++ b/src/grd-ctl.c
+@@ -67,6 +67,7 @@ process_options (GrdSettings       *settings,
+                  const SubCommand  *subcommands,
+                  int                n_subcommands)
+ {
++  gboolean subcommand_exists = FALSE;
+   int i;
+ 
+   if (argc <= 0)
+@@ -79,12 +80,10 @@ process_options (GrdSettings       *settings,
+       if (g_strcmp0 (argv[0], subcommands[i].subcommand) != 0)
+         continue;
+ 
++      subcommand_exists = TRUE;
++
+       if (subcommands[i].n_args != argc - 1)
+-        {
+-          g_printerr ("Wrong number of arguments for subcommand '%s'\n",
+-                      argv[0]);
+-          return EX_USAGE;
+-        }
++        continue;
+ 
+       if (!subcommands[i].process (settings,
+                                    argc - 1, argv + 1, &error))
+@@ -99,7 +98,11 @@ process_options (GrdSettings       *settings,
+       return EXIT_SUCCESS;
+     }
+ 
+-  g_printerr ("Unknown subcommand '%s'\n", argv[0]);
++  if (subcommand_exists)
++    g_printerr ("Wrong number of arguments for subcommand '%s'\n", argv[0]);
++  else
++    g_printerr ("Unknown subcommand '%s'\n", argv[0]);
++
+   return EX_USAGE;
+ }
+ 

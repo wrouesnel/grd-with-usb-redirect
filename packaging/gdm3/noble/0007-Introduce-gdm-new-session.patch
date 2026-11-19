@@ -1,0 +1,496 @@
+From a119b78961f3dd60694c0f4bdf87ed696dbcd53f Mon Sep 17 00:00:00 2001
+From: Joan Torres <joantolo@redhat.com>
+Date: Thu, 15 May 2025 21:12:20 +0200
+Subject: [PATCH] Introduce gdm-new-session
+
+This daemon/tool allows starting a user session either locally or headlessly.
+
+It communicates with the GDM daemon to start/stop the sessions using
+the dbus ifaces RemoteDisplayFactory and LocalDisplayFactory.
+
+It watches the GDM Displays dbus object manager to:
+  1. Check when a new session is created to ensure it has
+     successfully started the session for the user.
+  2. Check when the session is finalized to terminate itself.
+
+When it finds out it has successfully started the session, it stores the
+session_id. This allows terminating the session in the case this is
+terminated.
+
+Install also a service that allows starting a headless user session:
+gnome-headless-session@.service
+
+This provides the same functionality than TigerVNC vncserver@.service:
+  vncserver@.service allows to start a headless Xvnc session for a user.
+  There's a conf file that maps a display number and how that display
+  session should be, its username...
+  It is started as a system service. e.g. vncserver@:1.service
+
+In the case of gnome-headless-session@.service, there's no conf file.
+It is a system service that starts a headless gnome desktop session
+for the user passed as the argument. e.g. gnome-headless-session@joan.service
+
+In order to get remote access, it is needed to:
+  1. Configure gnome-remote-desktop for the user with grdctl --headless ...
+  2. Enable gnome-remote-desktop-headless.service.
+
+Now the polkit rule to use the dbus methods for create/destroy user
+displays is updated and only authorizes processes run from the unit
+service gnome-headless-session@.service and for the user passed as the.
+argument.
+
+Part-of: <https://gitlab.gnome.org/GNOME/gdm/-/merge_requests/288>
+---
+ daemon/gdm-display-factory.c            |  10 +-
+ data/gnome-headless-session@.service.in |  34 +++
+ data/meson.build                        |  10 +
+ data/polkit-gdm.rules.in                |   9 +-
+ utils/gdm-new-session.c                 | 293 ++++++++++++++++++++++++
+ utils/meson.build                       |  15 ++
+ 6 files changed, 369 insertions(+), 2 deletions(-)
+ create mode 100644 data/gnome-headless-session@.service.in
+ create mode 100644 utils/gdm-new-session.c
+
+diff --git a/daemon/gdm-display-factory.c b/daemon/gdm-display-factory.c
+index 640db4a..ca05f96 100644
+--- a/daemon/gdm-display-factory.c
++++ b/daemon/gdm-display-factory.c
+@@ -173,10 +173,13 @@ gdm_display_factory_authorize_manage_user_displays (GdmDisplayFactory      *fact
+ {
+         g_autoptr (PolkitAuthorizationResult) result = NULL;
+         g_autoptr (PolkitSubject) subject = NULL;
++        g_autoptr (PolkitDetails) details = NULL;
+         g_autoptr (GError) local_error = NULL;
++        const char *user = NULL;
+         const char *action;
+         const char *method;
+         const char *sender;
++        GVariant *parameters;
+         PolkitCheckAuthorizationFlags flags;
+         GdmDisplayFactoryPrivate *priv;
+ 
+@@ -196,13 +199,18 @@ gdm_display_factory_authorize_manage_user_displays (GdmDisplayFactory      *fact
+ 
+         priv = gdm_display_factory_get_instance_private (factory);
+ 
++        parameters = g_dbus_method_invocation_get_parameters (invocation);
++        g_variant_get (parameters, "(s)", &user);
++        details = polkit_details_new ();
++        polkit_details_insert (details, "user", user);
++
+         sender = g_dbus_method_invocation_get_sender (invocation);
+         subject = polkit_system_bus_name_new (sender);
+         action = GDM_DISPLAY_FACTORY_MANAGE_DISPLAYS_POLKIT_ACTION;
+         flags = POLKIT_CHECK_AUTHORIZATION_FLAGS_ALLOW_USER_INTERACTION;
+         result = polkit_authority_check_authorization_sync (priv->authority,
+                                                             subject, action,
+-                                                            NULL, flags, NULL,
++                                                            details, flags, NULL,
+                                                             &local_error);
+         if (!result) {
+                 g_set_error (error, GDM_DISPLAY_ERROR, GDM_DISPLAY_ERROR_GENERAL,
+diff --git a/data/gnome-headless-session@.service.in b/data/gnome-headless-session@.service.in
+new file mode 100644
+index 0000000..77d7f6f
+--- /dev/null
++++ b/data/gnome-headless-session@.service.in
+@@ -0,0 +1,34 @@
++[Unit]
++Description=GNOME Headless Desktop Session
++Requires=gdm.service
++After=gdm.service
++
++[Service]
++User=@GDM_USERNAME@
++ExecStart=@libexecdir@/gdm-new-session %i --headless
++Restart=on-failure
++
++LockPersonality=yes
++MemoryDenyWriteExecute=yes
++RestrictNamespaces=yes
++RestrictAddressFamilies=AF_UNIX
++RestrictRealtime=yes
++RestrictSUIDSGID=yes
++SystemCallArchitectures=native
++CapabilityBoundingSet=
++ProtectKernelModules=yes
++ProtectKernelLogs=yes
++ProtectKernelTunables=yes
++ProtectClock=yes
++ProtectHostname=yes
++ProtectControlGroups=yes
++ProtectHostname=yes
++ProtectProc=invisible
++PrivateDevices=yes
++PrivateNetwork=yes
++NoNewPrivileges=yes
++SystemCallArchitectures=native
++SystemCallFilter=@system-service
++
++[Install]
++WantedBy=graphical.target
+diff --git a/data/meson.build b/data/meson.build
+index 79233a7..787da88 100644
+--- a/data/meson.build
++++ b/data/meson.build
+@@ -190,6 +190,16 @@ if systemdsystemunitdir != 'no'
+     install_dir: systemd_systemunitdir,
+     format: 'cmake'
+   )
++
++  configure_file(
++    input: 'gnome-headless-session@.service.in',
++    output: '@BASENAME@',
++    configuration: {
++      'GDM_USERNAME': get_option('user'),
++      'libexecdir': gdm_prefix / get_option('libexecdir'),
++    },
++    install_dir: systemd_systemunitdir,
++  )
+ endif
+ 
+ gdm_gnome_session_wanted_targets = []
+diff --git a/data/polkit-gdm.rules.in b/data/polkit-gdm.rules.in
+index ee08036..dae51f5 100644
+--- a/data/polkit-gdm.rules.in
++++ b/data/polkit-gdm.rules.in
+@@ -3,6 +3,13 @@ polkit.addRule(function(action, subject) {
+         return undefined;
+ 
+     if (action.id == "org.gnome.displaymanager.displayfactory.manage-user-displays") {
+-        return polkit.Result.YES;
++        const user = action.lookup("user");
++        const system_unit = subject.system_unit;
++
++        if (user && system_unit) {
++            const match = system_unit.match(/^gnome-headless-session@(.+?)\.service$/);
++            if (match && user == match[1])
++                return polkit.Result.YES;
++        }
+     }
+ });
+diff --git a/utils/gdm-new-session.c b/utils/gdm-new-session.c
+new file mode 100644
+index 0000000..898ca51
+--- /dev/null
++++ b/utils/gdm-new-session.c
+@@ -0,0 +1,293 @@
++/*
++ * SPDX-FileCopyrightText: 2025 Joan Torres Lopez <joantolo@redhat.com>
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "config.h"
++
++#include <gio/gio.h>
++#include <glib-unix.h>
++#include <sysexits.h>
++#include <systemd/sd-login.h>
++
++#define GDM_DBUS_NAME                        "org.gnome.DisplayManager"
++#define GDM_LOCAL_DISPLAY_FACTORY_PATH       "/org/gnome/DisplayManager/LocalDisplayFactory"
++#define GDM_REMOTE_DISPLAY_FACTORY_PATH      "/org/gnome/DisplayManager/RemoteDisplayFactory"
++#define GDM_DISPLAYS_PATH                    "/org/gnome/DisplayManager/Displays"
++#define GDM_LOCAL_DISPLAY_FACTORY_INTERFACE  "org.gnome.DisplayManager.LocalDisplayFactory"
++#define GDM_REMOTE_DISPLAY_FACTORY_INTERFACE "org.gnome.DisplayManager.RemoteDisplayFactory"
++#define GDM_DISPLAY_INTERFACE                "org.gnome.DisplayManager.Display"
++
++typedef struct _State {
++        GMainLoop *event_loop;
++
++        GDBusConnection *connection;
++        GDBusObjectManager *displays;
++
++        char *username;
++        gboolean headless;
++
++        char *display_path;
++
++        gboolean terminate_requested;
++} State;
++
++static gboolean terminate_session (State   *state,
++                                   GError **error);
++
++static void
++state_free (State *state)
++{
++        g_clear_pointer (&state->event_loop, g_main_loop_unref);
++        g_clear_object (&state->connection);
++        g_clear_object (&state->displays);
++        g_clear_pointer (&state->username, g_free);
++        g_clear_pointer (&state->display_path, g_free);
++        g_free (state);
++}
++
++G_DEFINE_AUTOPTR_CLEANUP_FUNC (State, state_free);
++
++static void
++on_display_added (GDBusObjectManager *displays,
++                  GDBusObject        *display_object,
++                  State              *state)
++{
++        g_autoptr (GDBusInterface) display_proxy = NULL;
++        g_autoptr (GVariant) reply = NULL;
++        g_autoptr (GError) error = NULL;
++        g_autofree char *session_id = NULL;
++        g_autofree char *username = NULL;
++
++        display_proxy = g_dbus_object_get_interface (display_object, GDM_DISPLAY_INTERFACE);
++        if (display_proxy == NULL) {
++                g_warning ("GDM exported a non Display object on dbus");
++                return;
++        }
++
++        reply = g_dbus_proxy_call_sync (G_DBUS_PROXY (display_proxy),
++                                        "GetSessionId",
++                                        NULL,
++                                        G_DBUS_CALL_FLAGS_NONE,
++                                        -1,
++                                        NULL,
++                                        &error);
++        if (reply == NULL) {
++                g_warning ("Failed getting SessionId: %s", error->message);
++                return;
++        }
++
++        g_variant_get (reply, "(s)", &session_id);
++
++        if (sd_session_get_username (session_id, &username) < 0)
++                return;
++
++        if (g_strcmp0 (state->username, username) == 0) {
++                g_print ("Session started\n");
++
++                g_set_str (&state->display_path, g_dbus_object_get_object_path (display_object));
++
++                g_signal_handlers_disconnect_by_func (displays,
++                                                      G_CALLBACK (on_display_added),
++                                                      state);
++
++                if (state->terminate_requested) {
++                        if (!terminate_session (state, &error))
++                                g_warning ("Terminating session failed: %s", error->message);
++                }
++        }
++}
++static void
++on_display_removed (GDBusObjectManager *displays,
++                    GDBusObject        *display_object,
++                    State              *state)
++{
++        const char *display_path = g_dbus_object_get_object_path (display_object);
++
++        if (g_strcmp0 (state->display_path, display_path) == 0) {
++                g_print ("Session finished\n");
++
++                g_set_str (&state->display_path, NULL);
++                g_main_loop_quit (state->event_loop);
++        }
++}
++
++static gboolean
++watch_displays (State *state,
++                GError **error)
++{
++        g_autoptr (GDBusObjectManager) displays = NULL;
++
++        displays = g_dbus_object_manager_client_new_sync (state->connection,
++                                                          G_DBUS_OBJECT_MANAGER_CLIENT_FLAGS_NONE,
++                                                          GDM_DBUS_NAME,
++                                                          GDM_DISPLAYS_PATH,
++                                                          NULL,
++                                                          NULL,
++                                                          NULL,
++                                                          NULL,
++                                                          error);
++        if (displays == NULL) {
++                g_dbus_error_strip_remote_error (*error);
++                return FALSE;
++        }
++
++        g_signal_connect (displays,
++                          "object-added",
++                          G_CALLBACK (on_display_added),
++                          state);
++
++        g_signal_connect (displays,
++                          "object-removed",
++                          G_CALLBACK (on_display_removed),
++                          state);
++
++        state->displays = g_steal_pointer (&displays);
++
++        return TRUE;
++}
++
++static gboolean
++setup (State   *state,
++       GError **error)
++{
++        g_autoptr (GDBusConnection) connection = NULL;
++
++        connection = g_bus_get_sync (G_BUS_TYPE_SYSTEM, NULL, error);
++        if (connection == NULL) {
++                g_dbus_error_strip_remote_error (*error);
++                return FALSE;
++        }
++
++        state->connection = g_steal_pointer (&connection);
++
++        if (!watch_displays (state, error))
++                return FALSE;
++
++        return TRUE;
++}
++
++static gboolean
++call_gdm_display_factory_method (State       *state,
++                                 const char  *method,
++                                 GError     **error)
++{
++        GDBusConnection *connection = state->connection;
++        gboolean headless = state->headless;
++        g_autoptr (GVariant) reply = NULL;
++        const char *dbus_path;
++        const char *dbus_iface;
++
++        if (headless) {
++                dbus_path = GDM_REMOTE_DISPLAY_FACTORY_PATH;
++                dbus_iface = GDM_REMOTE_DISPLAY_FACTORY_INTERFACE;
++        } else {
++                dbus_path = GDM_LOCAL_DISPLAY_FACTORY_PATH;
++                dbus_iface = GDM_LOCAL_DISPLAY_FACTORY_INTERFACE;
++        }
++
++        reply = g_dbus_connection_call_sync (connection,
++                                             GDM_DBUS_NAME,
++                                             dbus_path,
++                                             dbus_iface,
++                                             method,
++                                             g_variant_new ("(s)", state->username),
++                                             NULL,
++                                             G_DBUS_CALL_FLAGS_NONE,
++                                             -1, NULL, error);
++        if (reply == NULL) {
++                g_dbus_error_strip_remote_error (*error);
++                return FALSE;
++        }
++
++        return TRUE;
++}
++
++static gboolean
++create_session (State   *state,
++                GError **error)
++{
++        return call_gdm_display_factory_method (state,
++                                                "CreateUserDisplay",
++                                                error);
++}
++
++static gboolean
++terminate_session (State   *state,
++                   GError **error)
++{
++        return call_gdm_display_factory_method (state,
++                                                "DestroyUserDisplay",
++                                                error);
++}
++
++static gboolean
++on_sigterm (State *state)
++{
++        g_autoptr (GError) error = NULL;
++
++        // Got SIGTERM before the session is created,
++        // wait for it to be created and then terminate it
++        if (state->display_path == NULL) {
++                state->terminate_requested = TRUE;
++                return G_SOURCE_REMOVE;
++        }
++
++        if (!terminate_session (state, &error))
++                g_warning ("Terminating session failed: %s", error->message);
++
++        return G_SOURCE_REMOVE;
++}
++
++int
++main (int   argc,
++      char *argv[])
++{
++        g_autoptr (GOptionContext) context = NULL;
++        g_autoptr (State) state = NULL;
++        g_autoptr (GError) error = NULL;
++        g_autofree char *username = NULL;
++        gboolean headless = FALSE;
++
++        GOptionEntry entries[] =
++        {
++                { "headless", 'h', 0, G_OPTION_ARG_NONE, &headless, "Run headless session", NULL },
++                { NULL }
++        };
++
++        context = g_option_context_new ("USER - Run a graphical session as a specified user");
++        g_option_context_add_main_entries (context, entries, NULL);
++
++        if (!g_option_context_parse (context, &argc, &argv, &error)) {
++                g_printerr ("Option parsing failed: %s\n", error->message);
++                return EX_USAGE;
++        }
++
++        if (argc < 2) {
++                g_printerr ("Username is required\n");
++                return EX_USAGE;
++        }
++
++        username = g_strdup (argv[1]);
++
++        state = g_new0 (State, 1);
++        state->username = g_steal_pointer (&username);
++        state->event_loop = g_main_loop_new (NULL, FALSE);
++        state->headless = headless;
++
++        if (!setup (state, &error)) {
++                g_printerr ("Failed: %s\n", error->message);
++                return EX_SOFTWARE;
++        }
++
++        if (!create_session (state, &error)) {
++                g_printerr ("Starting session failed: %s\n", error->message);
++                return EX_SOFTWARE;
++        }
++
++        g_unix_signal_add (SIGTERM, (GSourceFunc) on_sigterm, state);
++
++        g_main_loop_run (state->event_loop);
++
++        return EX_OK;
++}
+diff --git a/utils/meson.build b/utils/meson.build
+index e4141fb..4245603 100644
+--- a/utils/meson.build
++++ b/utils/meson.build
+@@ -50,6 +50,21 @@ gdm_auth_config = executable('gdm-config',
+   install: true,
+ )
+ 
++# gdm-new-session
++gdm_new_session_deps = [
++  glib_dep,
++  gio_dep,
++  logind_dep,
++]
++
++gdm_new_session = executable('gdm-new-session',
++  'gdm-new-session.c',
++  dependencies: gdm_new_session_deps,
++  include_directories: config_h_dir,
++  install: true,
++  install_dir: get_option('libexecdir'),
++)
++
+ auth_config_distro_hooks = [
+   'redhat',
+   'generic',

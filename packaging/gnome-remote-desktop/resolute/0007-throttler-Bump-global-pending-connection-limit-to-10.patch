@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20=C3=85dahl?= <jadahl@gmail.com>
+Date: Wed, 30 Sep 2026 00:46:49 +0200
+Subject: [PATCH] throttler: Bump global pending connection limit to 1000
+
+Before we had 5 as the limit per peer, and 10 global. That meant 2 peers
+could easily cause any other peer to fail to connect. Change the limit
+to 1000, meaning one need at least 200.
+
+Part-of: <https://gitlab.gnome.org/GNOME/gnome-remote-desktop/-/merge_requests/436>
+(cherry picked from commit cf336009550240b369df99c165540f2fa46494fe)
+(cherry picked from commit 0dde187d6fdf6a014f1cc619e700ff1cf40a0d6b)
+---
+ src/grd-throttler.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/grd-throttler.c b/src/grd-throttler.c
+index 1f8985a..fdab7d9 100644
+--- a/src/grd-throttler.c
++++ b/src/grd-throttler.c
+@@ -27,7 +27,7 @@
+ 
+ #define DEFAULT_MAX_CONNECTIONS_PER_PEER 5
+ #define DEFAULT_MAX_PENDING_CONNECTIONS 5
+-#define DEFAULT_MAX_ATTEMPTS_PER_SECOND 10
++#define DEFAULT_MAX_ATTEMPTS_PER_SECOND 1000
+ 
+ struct _GrdThrottlerLimits
+ {

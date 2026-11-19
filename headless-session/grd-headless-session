@@ -1,0 +1,109 @@
+#!/bin/sh
+# Sets up a persistent headless GNOME session for a user, reachable over RDP
+# with gnome-remote-desktop. The session starts at boot and keeps running when
+# the RDP client disconnects, like a Windows Remote Desktop session.
+#
+# Usage:
+#   grd-headless-session enable [--start] [--set-account-password] <user>
+#       Reads the RDP password from stdin. The RDP username is <user>.
+#   grd-headless-session disable [--stop] <user>
+#   grd-headless-session status <user>
+#
+# Run it as root.
+set -eu
+
+prog=${0##*/}
+usage() { sed -n '2,/^$/s/^# \{0,1\}//p' "$0" >&2; exit 2; }
+die() { echo "$prog: $*" >&2; exit 1; }
+
+[ $# -ge 1 ] || usage
+cmd=$1; shift
+start= stop= set_account_password=
+while [ $# -gt 1 ]; do
+    case $1 in
+        --start) start=1 ;;
+        --stop) stop=1 ;;
+        --set-account-password) set_account_password=1 ;;
+        *) usage ;;
+    esac
+    shift
+done
+[ $# -eq 1 ] || usage
+user=$1
+
+[ "$(id -u)" -eq 0 ] || die "run this as root"
+uid=$(id -u "$user" 2>/dev/null) || die "no such user: $user"
+[ "$uid" -ne 0 ] || die "refusing to run a remote session as root"
+session_unit=gnome-headless-session@$user.service
+[ -e /usr/lib/systemd/system/gnome-headless-session@.service ] ||
+    [ -e /etc/systemd/system/gnome-headless-session@.service ] ||
+    die "gdm has no gnome-headless-session@.service; this needs gdm 50, or a gdm with the gdm-new-session backport"
+
+runtime=/run/user/$uid
+as_user() {
+    runuser -u "$user" -- env XDG_RUNTIME_DIR="$runtime" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" "$@"
+}
+wait_for_user_bus() {
+    i=0
+    while [ ! -S "$runtime/bus" ]; do
+        i=$((i + 1))
+        [ $i -le 60 ] || die "the user's systemd instance didn't start"
+        sleep 1
+    done
+}
+
+case $cmd in
+enable)
+    # Read the password before touching anything, so a bad input changes nothing.
+    IFS= read -r password || [ -n "${password:-}" ] || die "no password on stdin"
+    [ -n "$password" ] || die "the password is empty"
+
+    if getent group rdp-usb-gw >/dev/null; then
+        usermod -aG rdp-usb-gw "$user"
+    fi
+    loginctl enable-linger "$user"
+    systemctl start "user@$uid.service"
+    wait_for_user_bus
+
+    as_user /usr/libexec/grd-with-usb-redirect/grd-ensure-tls-cert
+    # Username as an argument and the password on stdin works with every
+    # grdctl: it asks only for the password, and it's never on a command line.
+    printf '%s\n' "$password" | as_user grdctl --headless rdp set-credentials "$user" >/dev/null
+    if [ -n "$set_account_password" ]; then
+        printf '%s:%s\n' "$user" "$password" | chpasswd
+    fi
+    unset password
+    as_user grdctl --headless rdp disable-view-only
+    as_user grdctl --headless rdp enable
+    as_user systemctl --user enable gnome-remote-desktop-headless.service
+    systemctl enable "$session_unit"
+    if [ -n "$start" ]; then
+        systemctl restart "$session_unit"
+        as_user systemctl --user restart gnome-remote-desktop-headless.service
+    else
+        echo "Enabled. The session starts at the next boot, or now with: systemctl start $session_unit"
+    fi
+    ;;
+disable)
+    systemctl disable "$session_unit"
+    if [ -S "$runtime/bus" ]; then
+        as_user systemctl --user disable gnome-remote-desktop-headless.service
+        as_user grdctl --headless rdp disable
+    fi
+    if [ -n "$stop" ]; then
+        systemctl stop "$session_unit"
+        [ ! -S "$runtime/bus" ] || as_user systemctl --user stop gnome-remote-desktop-headless.service
+    fi
+    echo "Disabled. Lingering is left on; turn it off with: loginctl disable-linger $user"
+    ;;
+status)
+    systemctl --no-pager status "$session_unit" || true
+    if [ -S "$runtime/bus" ]; then
+        as_user systemctl --no-pager --user status gnome-remote-desktop-headless.service || true
+        as_user grdctl --headless status
+    fi
+    ;;
+*)
+    usage ;;
+esac

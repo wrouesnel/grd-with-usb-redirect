@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20=C3=85dahl?= <jadahl@gmail.com>
+Date: Tue, 29 Sep 2026 16:51:52 +0200
+Subject: [PATCH] session: Add 'starting' signal
+
+This will be used to emit a signal before a session is started, after a
+connection is authenticated.
+
+Part-of: <https://gitlab.gnome.org/GNOME/gnome-remote-desktop/-/merge_requests/436>
+(cherry picked from commit 2b807428399077ee8ac580a577582bbec27f63d1)
+(cherry picked from commit 473872a599340ffdb7c4b0df139b5133dde942f7)
+---
+ src/grd-session.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/grd-session.c b/src/grd-session.c
+index c2a8682..7f452d0 100644
+--- a/src/grd-session.c
++++ b/src/grd-session.c
+@@ -50,6 +50,7 @@ enum
+ enum
+ {
+   READY,
++  STARTING,
+   STARTED,
+   STOPPED,
+   TOUCH_DEVICE_ADDED,
+@@ -1796,6 +1797,8 @@ grd_session_start (GrdSession *session)
+   GrdSessionPrivate *priv = grd_session_get_instance_private (session);
+   GrdDBusMutterRemoteDesktop *remote_desktop_proxy;
+ 
++  g_signal_emit (session, signals[STARTING], 0);
++
+   priv->cancellable = g_cancellable_new ();
+ 
+   remote_desktop_proxy = grd_context_get_mutter_remote_desktop_proxy (priv->context);
+@@ -1962,6 +1965,12 @@ grd_session_class_init (GrdSessionClass *klass)
+                                  0,
+                                  NULL, NULL, NULL,
+                                  G_TYPE_NONE, 0);
++  signals[STARTING] = g_signal_new ("starting",
++                                    G_TYPE_FROM_CLASS (klass),
++                                    G_SIGNAL_RUN_LAST,
++                                    0,
++                                    NULL, NULL, NULL,
++                                    G_TYPE_NONE, 0);
+   signals[STARTED] = g_signal_new ("started",
+                                    G_TYPE_FROM_CLASS (klass),
+                                    G_SIGNAL_RUN_LAST,

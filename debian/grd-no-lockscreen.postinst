@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ] && command -v dconf >/dev/null; then
+    dconf update
+fi
+#DEBHELPER#

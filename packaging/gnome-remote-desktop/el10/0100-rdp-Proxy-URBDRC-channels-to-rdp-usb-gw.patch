@@ -1,6 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Will Rouesnel <wrouesnel@wrouesnel.com>
+Date: Thu, 19 Nov 2026 23:33:22 +1100
+Subject: [PATCH] rdp: Proxy URBDRC channels to rdp-usb-gw
+
+RDP clients can redirect USB devices to the server over the URBDRC
+dynamic virtual channel (MS-RDPEUSB). Implementing MS-RDPEUSB means
+handling USB request blocks and making devices appear on the host, which
+doesn't belong in gnome-remote-desktop.
+
+rdp-usb-gw does that: it implements the server side of MS-RDPEUSB and
+attaches redirected devices with USB/IP's vhci_hcd. It doesn't speak
+RDP, and instead borrows the session's URBDRC channels over a unix
+socket.
+
+When the session's dynamic channels are ready, connect to rdp-usb-gw's
+socket and open, close, and relay URBDRC channel instances as it asks.
+The socket protocol is described in rdp-usb-gw's docs/protocol.md.
+
+If the socket isn't there, carry on without USB redirection.
+RDP_USB_GW_SOCKET overrides the socket path.
+
+(cherry picked from commit 4d281440aff87689881f5c1632fd8ee98200cf82)
+(cherry picked from commit 087a6c05b23ad0068ac5bcf946eff63338850a2c)
+---
+ src/grd-rdp-dvc-urbdrc.c | 546 +++++++++++++++++++++++++++++++++++++++
+ src/grd-rdp-dvc-urbdrc.h |  30 +++
+ src/grd-rdp-dvc.c        |   2 +
+ src/grd-rdp-private.h    |   1 +
+ src/grd-session-rdp.c    |  14 +
+ src/grd-session-rdp.h    |   1 +
+ src/grd-types.h          |   1 +
+ src/meson.build          |   2 +
+ 8 files changed, 597 insertions(+)
+ create mode 100644 src/grd-rdp-dvc-urbdrc.c
+ create mode 100644 src/grd-rdp-dvc-urbdrc.h
+
 diff --git a/src/grd-rdp-dvc-urbdrc.c b/src/grd-rdp-dvc-urbdrc.c
 new file mode 100644
-index 0000000..ce4366a
+index 0000000..a5a4df5
 --- /dev/null
 +++ b/src/grd-rdp-dvc-urbdrc.c
 @@ -0,0 +1,546 @@
@@ -552,7 +589,7 @@ index 0000000..ce4366a
 +}
 diff --git a/src/grd-rdp-dvc-urbdrc.h b/src/grd-rdp-dvc-urbdrc.h
 new file mode 100644
-index 0000000..e014d5e
+index 0000000..3227b2a
 --- /dev/null
 +++ b/src/grd-rdp-dvc-urbdrc.h
 @@ -0,0 +1,30 @@
@@ -600,20 +637,20 @@ index 4c2210b..3e7b1a2 100644
  
    g_assert_not_reached ();
 diff --git a/src/grd-rdp-private.h b/src/grd-rdp-private.h
-index 47057f1..2325dbb 100644
+index 1c280a8..0724f9f 100644
 --- a/src/grd-rdp-private.h
 +++ b/src/grd-rdp-private.h
-@@ -50,4 +50,5 @@ typedef struct _RdpPeerContext
-   GrdRdpDvcInput *input;
+@@ -51,4 +51,5 @@ typedef struct _RdpPeerContext
  #endif
    GrdRdpDvcTelemetry *telemetry;
+   GrdRdpDeviceRedirection *device_redirection;
 +  GrdRdpDvcUrbdrc *urbdrc;
  } RdpPeerContext;
 diff --git a/src/grd-session-rdp.c b/src/grd-session-rdp.c
-index 3ea2bb9..cfaa473 100644
+index ba05225..9d8c8e0 100644
 --- a/src/grd-session-rdp.c
 +++ b/src/grd-session-rdp.c
-@@ -41,6 +41,7 @@
+@@ -46,6 +46,7 @@
  #include "grd-rdp-dvc-input.h"
  #endif
  #include "grd-rdp-dvc-telemetry.h"
@@ -621,7 +658,7 @@ index 3ea2bb9..cfaa473 100644
  #include "grd-rdp-event-queue.h"
  #include "grd-rdp-layout-manager.h"
  #include "grd-rdp-network-autodetection.h"
-@@ -464,6 +465,9 @@ grd_session_rdp_tear_down_channel (GrdSessionRdp *session_rdp,
+@@ -495,6 +496,9 @@ grd_session_rdp_tear_down_channel (GrdSessionRdp *session_rdp,
      case GRD_RDP_CHANNEL_TELEMETRY:
        g_clear_object (&rdp_peer_context->telemetry);
        break;
@@ -631,7 +668,7 @@ index 3ea2bb9..cfaa473 100644
      }
    g_mutex_unlock (&rdp_peer_context->channel_mutex);
  }
-@@ -1423,6 +1427,7 @@ socket_thread_func (gpointer data)
+@@ -1795,6 +1799,7 @@ socket_thread_func (gpointer data)
            WTSVirtualChannelManagerIsChannelJoined (vcm, DRDYNVC_SVC_CHANNEL_NAME))
          {
            GrdRdpDvcTelemetry *telemetry;
@@ -639,7 +676,7 @@ index 3ea2bb9..cfaa473 100644
            GrdRdpDvcGraphicsPipeline *graphics_pipeline;
  #if 0
            GrdRdpDvcInput *input;
-@@ -1443,6 +1448,7 @@ socket_thread_func (gpointer data)
+@@ -1815,6 +1820,7 @@ socket_thread_func (gpointer data)
              case DRDYNVC_STATE_READY:
                g_mutex_lock (&rdp_peer_context->channel_mutex);
                telemetry = rdp_peer_context->telemetry;
@@ -647,7 +684,7 @@ index 3ea2bb9..cfaa473 100644
                graphics_pipeline = rdp_peer_context->graphics_pipeline;
  #if 0
                input = rdp_peer_context->input;
-@@ -1453,6 +1459,8 @@ socket_thread_func (gpointer data)
+@@ -1825,6 +1831,8 @@ socket_thread_func (gpointer data)
  
                if (telemetry && !session_rdp->session_should_stop)
                  grd_rdp_dvc_maybe_init (GRD_RDP_DVC (telemetry));
@@ -656,15 +693,15 @@ index 3ea2bb9..cfaa473 100644
                if (graphics_pipeline && !session_rdp->session_should_stop)
                  grd_rdp_dvc_maybe_init (GRD_RDP_DVC (graphics_pipeline));
  #if 0
-@@ -1638,6 +1646,7 @@ grd_session_rdp_stop (GrdSession *session)
+@@ -1994,6 +2002,7 @@ grd_session_rdp_stop (GrdSession *session)
  #endif
    g_clear_object (&rdp_peer_context->graphics_pipeline);
    g_clear_object (&rdp_peer_context->telemetry);
 +  g_clear_object (&rdp_peer_context->urbdrc);
    g_mutex_unlock (&rdp_peer_context->channel_mutex);
  
-   g_clear_pointer (&session_rdp->socket_thread, g_thread_join);
-@@ -1689,6 +1698,7 @@ initialize_graphics_pipeline (GrdSessionRdp *session_rdp)
+   g_socket_shutdown (g_socket_connection_get_socket (session_rdp->connection),
+@@ -2048,6 +2057,7 @@ initialize_graphics_pipeline (GrdSessionRdp *session_rdp)
    GrdRdpDvcTelemetry *telemetry;
  
    g_assert (!rdp_peer_context->telemetry);
@@ -672,7 +709,7 @@ index 3ea2bb9..cfaa473 100644
    g_assert (!rdp_peer_context->graphics_pipeline);
  
    telemetry = grd_rdp_dvc_telemetry_new (session_rdp,
-@@ -1697,6 +1707,10 @@ initialize_graphics_pipeline (GrdSessionRdp *session_rdp)
+@@ -2056,6 +2066,10 @@ initialize_graphics_pipeline (GrdSessionRdp *session_rdp)
                                           rdp_context);
    rdp_peer_context->telemetry = telemetry;
  
@@ -684,7 +721,7 @@ index 3ea2bb9..cfaa473 100644
      grd_rdp_dvc_graphics_pipeline_new (session_rdp,
                                         session_rdp->renderer,
 diff --git a/src/grd-session-rdp.h b/src/grd-session-rdp.h
-index a6358e6..49e4546 100644
+index a6b112f..9db080f 100644
 --- a/src/grd-session-rdp.h
 +++ b/src/grd-session-rdp.h
 @@ -52,6 +52,7 @@ typedef enum _GrdRdpChannel
@@ -696,10 +733,10 @@ index a6358e6..49e4546 100644
  
  GrdSessionRdp *grd_session_rdp_new (GrdRdpServer      *rdp_server,
 diff --git a/src/grd-types.h b/src/grd-types.h
-index f392c13..0d8dbf2 100644
+index 84af5f8..d7519b5 100644
 --- a/src/grd-types.h
 +++ b/src/grd-types.h
-@@ -56,6 +56,7 @@ typedef struct _GrdRdpDvcHandler GrdRdpDvcHandler;
+@@ -57,6 +57,7 @@ typedef struct _GrdRdpDvcHandler GrdRdpDvcHandler;
  typedef struct _GrdRdpDvcInput GrdRdpDvcInput;
  #endif
  typedef struct _GrdRdpDvcTelemetry GrdRdpDvcTelemetry;
@@ -708,10 +745,10 @@ index f392c13..0d8dbf2 100644
  typedef struct _GrdRdpFrame GrdRdpFrame;
  typedef struct _GrdRdpFrameStats GrdRdpFrameStats;
 diff --git a/src/meson.build b/src/meson.build
-index 15a33a8..879cbdb 100644
+index 245aceb..5d912df 100644
 --- a/src/meson.build
 +++ b/src/meson.build
-@@ -154,6 +154,8 @@ if have_rdp
+@@ -157,6 +157,8 @@ if have_rdp
      #'grd-rdp-dvc-input.h',
      'grd-rdp-dvc-telemetry.c',
      'grd-rdp-dvc-telemetry.h',

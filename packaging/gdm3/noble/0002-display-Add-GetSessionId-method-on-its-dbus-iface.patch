@@ -1,0 +1,78 @@
+From ad1b179b360486bb5391a2eda08d533539906f98 Mon Sep 17 00:00:00 2001
+From: Joan Torres <joantolo@redhat.com>
+Date: Thu, 15 May 2025 16:54:57 +0200
+Subject: [PATCH] display: Add GetSessionId method on its dbus iface
+
+This will be used when creating a new user session to track when it gets
+destroyed.
+
+Part-of: <https://gitlab.gnome.org/GNOME/gdm/-/merge_requests/288>
+---
+ daemon/gdm-display.c   | 17 +++++++++++++++++
+ daemon/gdm-display.xml |  3 +++
+ data/gdm.conf.in       |  3 +++
+ 3 files changed, 23 insertions(+)
+
+diff --git a/daemon/gdm-display.c b/daemon/gdm-display.c
+index a8f6c14..159178e 100644
+--- a/daemon/gdm-display.c
++++ b/daemon/gdm-display.c
+@@ -1116,6 +1116,21 @@ handle_get_seat_id (GdmDBusDisplay        *skeleton,
+         return TRUE;
+ }
+ 
++static gboolean
++handle_get_session_id (GdmDBusDisplay        *skeleton,
++                       GDBusMethodInvocation *invocation,
++                       GdmDisplay            *self)
++{
++        GdmDisplayPrivate *priv = gdm_display_get_instance_private (self);
++
++        gdm_dbus_display_complete_get_session_id (skeleton,
++                                                  invocation,
++                                                  priv->session_id ?
++                                                  priv->session_id : "");
++
++        return TRUE;
++}
++
+ static gboolean
+ handle_get_x11_display_name (GdmDBusDisplay        *skeleton,
+                              GDBusMethodInvocation *invocation,
+@@ -1181,6 +1196,8 @@ register_display (GdmDisplay *self)
+                                  G_CALLBACK (handle_get_remote_hostname), self, 0);
+         g_signal_connect_object (priv->display_skeleton, "handle-get-seat-id",
+                                  G_CALLBACK (handle_get_seat_id), self, 0);
++        g_signal_connect_object (priv->display_skeleton, "handle-get-session-id",
++                                 G_CALLBACK (handle_get_session_id), self, 0);
+         g_signal_connect_object (priv->display_skeleton, "handle-get-x11-display-name",
+                                  G_CALLBACK (handle_get_x11_display_name), self, 0);
+         g_signal_connect_object (priv->display_skeleton, "handle-is-local",
+diff --git a/daemon/gdm-display.xml b/daemon/gdm-display.xml
+index 3e9b5d8..18bd2a8 100644
+--- a/daemon/gdm-display.xml
++++ b/daemon/gdm-display.xml
+@@ -10,6 +10,9 @@
+     <method name="GetSeatId">
+       <arg name="filename" direction="out" type="s"/>
+     </method>
++    <method name="GetSessionId">
++      <arg name="session" direction="out" type="s"/>
++    </method>
+     <method name="IsInitial">
+       <arg name="initial" direction="out" type="b"/>
+     </method>
+diff --git a/data/gdm.conf.in b/data/gdm.conf.in
+index cbaa356..22f6456 100644
+--- a/data/gdm.conf.in
++++ b/data/gdm.conf.in
+@@ -61,6 +61,9 @@
+     <allow send_destination="org.gnome.DisplayManager"
+            send_interface="org.gnome.DisplayManager.Display"
+            send_member="GetSeatId"/>
++    <allow send_destination="org.gnome.DisplayManager"
++           send_interface="org.gnome.DisplayManager.Display"
++           send_member="GetSessionId"/>
+     <allow send_destination="org.gnome.DisplayManager"
+            send_interface="org.gnome.DisplayManager.Display"
+            send_member="GetX11DisplayName"/>
