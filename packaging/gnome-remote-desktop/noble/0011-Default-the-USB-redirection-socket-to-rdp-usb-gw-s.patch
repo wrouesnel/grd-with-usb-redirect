@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Will Rouesnel <wrouesnel@wrouesnel.com>
+Date: Fri, 20 Nov 2026 08:13:28 +1100
+Subject: [PATCH] Default the USB redirection socket to rdp-usb-gw's
+
+Downstream only: these builds go with rdp-usb-gw, so point
+usb-redirection-socket at its socket for every kind of session, as the
+system daemon's default too. Without rdp-usb-gw running, sessions carry
+on without USB redirection.
+---
+ data/grd.conf.in                                    | 3 +++
+ src/org.gnome.desktop.remote-desktop.gschema.xml.in | 2 +-
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/data/grd.conf.in b/data/grd.conf.in
+index 8da4f3a..2ac48d3 100644
+--- a/data/grd.conf.in
++++ b/data/grd.conf.in
+@@ -1,2 +1,5 @@
+ # GNOME Remote Desktop configuration file for the system daemon
+ # Don't modify this file, edit @GRD_CUSTOM_CONF@ instead
++
++[RDP]
++usb-redirection-socket=/run/rdp-usb-gw/channel.sock
+diff --git a/src/org.gnome.desktop.remote-desktop.gschema.xml.in b/src/org.gnome.desktop.remote-desktop.gschema.xml.in
+index 3497009..951a638 100644
+--- a/src/org.gnome.desktop.remote-desktop.gschema.xml.in
++++ b/src/org.gnome.desktop.remote-desktop.gschema.xml.in
+@@ -69,7 +69,7 @@
+       </description>
+     </key>
+     <key name='usb-redirection-socket' type='s'>
+-      <default>''</default>
++      <default>'/run/rdp-usb-gw/channel.sock'</default>
+       <summary>A path to the socket of a USB redirection broker</summary>
+       <description>
+         RDP clients can redirect USB devices over the URBDRC dynamic virtual
+-- 
+2.53.0
+

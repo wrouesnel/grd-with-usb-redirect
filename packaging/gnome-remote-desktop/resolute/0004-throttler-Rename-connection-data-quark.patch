@@ -44,3 +44,6 @@ index a5aef8c..65627cd 100644
 +  quark_connection_data =
 +    g_quark_from_static_string ("grd-throttler-connection-data");
  }
+-- 
+2.53.0
+

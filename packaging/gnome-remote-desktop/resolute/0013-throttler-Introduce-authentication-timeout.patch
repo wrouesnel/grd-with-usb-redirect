@@ -357,3 +357,6 @@ index c1ed674..f56a1d5 100644
  
    G_OBJECT_CLASS (grd_vnc_server_parent_class)->constructed (object);
  }
+-- 
+2.53.0
+

@@ -17,11 +17,11 @@ Part-of: <https://gitlab.gnome.org/GNOME/gnome-remote-desktop/-/merge_requests/4
  1 file changed, 3 insertions(+)
 
 diff --git a/src/grd-session-rdp.c b/src/grd-session-rdp.c
-index a77ed1a..2dd7ed2 100644
+index ecac9e0..eaea1bb 100644
 --- a/src/grd-session-rdp.c
 +++ b/src/grd-session-rdp.c
-@@ -2300,7 +2300,10 @@ grd_session_rdp_stop (GrdSession *session)
-   g_clear_object (&rdp_peer_context->urbdrc);
+@@ -2291,7 +2291,10 @@ grd_session_rdp_stop (GrdSession *session)
+   g_clear_object (&rdp_peer_context->telemetry);
    g_mutex_unlock (&rdp_peer_context->channel_mutex);
  
 +  g_socket_shutdown (g_socket_connection_get_socket (session_rdp->connection),
@@ -31,3 +31,6 @@ index a77ed1a..2dd7ed2 100644
    g_clear_handle_id (&session_rdp->notify_post_connected_source_id,
                       g_source_remove);
  
+-- 
+2.53.0
+

@@ -1,48 +1,48 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Will Rouesnel <wrouesnel@wrouesnel.com>
-Date: Thu, 19 Nov 2026 23:33:22 +1100
-Subject: [PATCH] rdp: Proxy URBDRC channels to rdp-usb-gw
+Date: Fri, 20 Nov 2026 08:10:06 +1100
+Subject: [PATCH] rdp: Let a USB redirection broker handle URBDRC channels
 
 RDP clients can redirect USB devices to the server over the URBDRC
 dynamic virtual channel (MS-RDPEUSB). Implementing MS-RDPEUSB means
-handling USB request blocks and making devices appear on the host, which
-doesn't belong in gnome-remote-desktop.
+handling USB request blocks and making devices appear on the host. That
+needs privileges and kernel interfaces that don't belong in
+gnome-remote-desktop.
 
-rdp-usb-gw does that: it implements the server side of MS-RDPEUSB and
-attaches redirected devices with USB/IP's vhci_hcd. It doesn't speak
-RDP, and instead borrows the session's URBDRC channels over a unix
-socket.
+Leave that to a separate program, a USB redirection broker, and lend it
+the session's URBDRC channels over a unix socket. When the session's
+dynamic channels are ready, connect to the socket in the new
+usb-redirection-socket setting, then open, close, and relay URBDRC
+channel instances as the broker asks. gnome-remote-desktop doesn't
+interpret any USB traffic.
 
-When the session's dynamic channels are ready, connect to rdp-usb-gw's
-socket and open, close, and relay URBDRC channel instances as it asks.
-The socket protocol is described in rdp-usb-gw's docs/protocol.md.
+The setting is empty by default, which leaves USB redirection off. If
+nothing is listening on the socket, the session carries on without it.
 
-If the socket isn't there, carry on without USB redirection.
-RDP_USB_GW_SOCKET overrides the socket path.
-
-(cherry picked from commit 4d281440aff87689881f5c1632fd8ee98200cf82)
-(cherry picked from commit 087a6c05b23ad0068ac5bcf946eff63338850a2c)
+Backported to 46, which has its own channel plumbing.
 ---
- src/grd-rdp-dvc-urbdrc.c | 546 +++++++++++++++++++++++++++++++++++++++
- src/grd-rdp-dvc-urbdrc.h |  30 +++
- src/grd-rdp-dvc.c        |   2 +
- src/grd-rdp-private.h    |   1 +
- src/grd-session-rdp.c    |  14 +
- src/grd-session-rdp.h    |   1 +
- src/grd-types.h          |   1 +
- src/meson.build          |   2 +
- 8 files changed, 597 insertions(+)
+ src/grd-rdp-dvc-urbdrc.c                      | 610 ++++++++++++++++++
+ src/grd-rdp-dvc-urbdrc.h                      |  35 +
+ src/grd-rdp-private.h                         |   1 +
+ src/grd-session-rdp.c                         |  23 +
+ src/grd-session-rdp.h                         |   1 +
+ src/grd-settings-user.c                       |   3 +
+ src/grd-settings.c                            |  19 +
+ src/grd-types.h                               |   1 +
+ src/meson.build                               |   2 +
+ ...nome.desktop.remote-desktop.gschema.xml.in |  12 +
+ 10 files changed, 707 insertions(+)
  create mode 100644 src/grd-rdp-dvc-urbdrc.c
  create mode 100644 src/grd-rdp-dvc-urbdrc.h
 
 diff --git a/src/grd-rdp-dvc-urbdrc.c b/src/grd-rdp-dvc-urbdrc.c
 new file mode 100644
-index 0000000..a5a4df5
+index 0000000..876ccfd
 --- /dev/null
 +++ b/src/grd-rdp-dvc-urbdrc.c
-@@ -0,0 +1,546 @@
+@@ -0,0 +1,610 @@
 +/*
-+ * Copyright (C) 2026 rdp-usb-gw contributors
++ * Copyright (C) 2026 Will Rouesnel
 + *
 + * This program is free software; you can redistribute it and/or
 + * modify it under the terms of the GNU General Public License as
@@ -61,20 +61,22 @@ index 0000000..a5a4df5
 + */
 +
 +/*
-+ * Carries every instance of the URBDRC dynamic channel to rdp-usb-gw over a
-+ * unix socket. This file knows nothing about USB. MS-RDPEUSB needs one control
-+ * instance plus one instance per device, so the bridge asks for each instance
-+ * and all protocol handling stays on its side of the socket.
++ * Lends every instance of the URBDRC dynamic channel to a USB redirection
++ * broker over a unix socket. This file knows nothing about USB. MS-RDPEUSB
++ * needs one control instance plus one instance per device, so the broker asks
++ * for each instance and all protocol handling stays on its side of the socket.
 + *
 + * Every frame is a header of three native-endian uint32_t values, type, channel
 + * and payload length, followed by the payload. Channel numbers are chosen by the
-+ * bridge (rdp-usb-gw). A channel that is refused or closed is reported with
-+ * FRAME_CLOSED. rdp-usb-gw's docs/protocol.md describes the format.
++ * broker. A channel that is refused or closed is reported with FRAME_CLOSED.
++ * docs/usb-redirection.md describes the protocol.
 + */
 +
 +#include "config.h"
 +
 +#include "grd-rdp-dvc-urbdrc.h"
++
++#include "grd-session-rdp.h"
 +
 +#include <errno.h>
 +#include <freerdp/channels/wtsvc.h>
@@ -89,7 +91,6 @@ index 0000000..a5a4df5
 +#include <winpr/synch.h>
 +#include <winpr/wtsapi.h>
 +
-+#define BRIDGE_SOCKET_PATH "/run/rdp-usb-gw/channel.sock"
 +#define URBDRC_CHANNEL_NAME "URBDRC"
 +
 +#define MAX_CHANNELS 64
@@ -99,11 +100,11 @@ index 0000000..a5a4df5
 +
 +typedef enum _FrameType
 +{
-+  FRAME_OPEN = 1,   /* bridge -> session */
-+  FRAME_OPENED = 2, /* session -> bridge, payload: uint32_t DVC channel id */
++  FRAME_OPEN = 1,   /* broker -> session */
++  FRAME_OPENED = 2, /* session -> broker, payload: uint32_t DVC channel id */
 +  FRAME_DATA = 3,   /* both directions */
-+  FRAME_CLOSE = 4,  /* bridge -> session */
-+  FRAME_CLOSED = 5, /* session -> bridge */
++  FRAME_CLOSE = 4,  /* broker -> session */
++  FRAME_CLOSED = 5, /* session -> broker */
 +} FrameType;
 +
 +typedef struct _FrameHeader
@@ -124,21 +125,31 @@ index 0000000..a5a4df5
 +
 +struct _GrdRdpDvcUrbdrc
 +{
-+  GrdRdpDvc parent;
++  GObject parent;
++
++  GrdSessionRdp *session_rdp;
++  GSource *channel_teardown_source;
 +
 +  HANDLE vcm;
++  char *socket_path;
 +  gboolean started;
 +
 +  GThread *proxy_thread;
 +  int stop_fd;
-+  int bridge_fd;
++  int broker_fd;
 +  DWORD session_id;
 +
 +  ProxyChannel channels[MAX_CHANNELS];
 +};
 +
 +G_DEFINE_TYPE (GrdRdpDvcUrbdrc, grd_rdp_dvc_urbdrc,
-+               GRD_TYPE_RDP_DVC)
++               G_TYPE_OBJECT)
++
++static void
++queue_channel_tear_down (GrdRdpDvcUrbdrc *urbdrc)
++{
++  g_source_set_ready_time (urbdrc->channel_teardown_source, 0);
++}
 +
 +static gboolean
 +send_all (int          fd,
@@ -198,12 +209,12 @@ index 0000000..a5a4df5
 +{
 +  FrameHeader header = { .type = type, .channel = channel, .length = length };
 +
-+  if (!send_all (urbdrc->bridge_fd, &header, sizeof (header),
++  if (!send_all (urbdrc->broker_fd, &header, sizeof (header),
 +                 length > 0 ? MSG_MORE : 0))
 +    return FALSE;
 +
 +  return length == 0 ||
-+         send_all (urbdrc->bridge_fd, payload, length, 0);
++         send_all (urbdrc->broker_fd, payload, length, 0);
 +}
 +
 +static ProxyChannel *
@@ -340,20 +351,20 @@ index 0000000..a5a4df5
 +}
 +
 +static gboolean
-+handle_bridge_frame (GrdRdpDvcUrbdrc *urbdrc)
++handle_broker_frame (GrdRdpDvcUrbdrc *urbdrc)
 +{
 +  g_autofree char *payload = NULL;
 +  ProxyChannel *channel;
 +  FrameHeader header;
 +  ULONG written = 0;
 +
-+  if (!recv_all (urbdrc->bridge_fd, &header, sizeof (header)))
++  if (!recv_all (urbdrc->broker_fd, &header, sizeof (header)))
 +    return FALSE;
 +  if (header.length > MAX_FRAME_PAYLOAD)
 +    return FALSE;
 +
 +  payload = g_malloc (MAX (header.length, 1));
-+  if (!recv_all (urbdrc->bridge_fd, payload, header.length))
++  if (!recv_all (urbdrc->broker_fd, payload, header.length))
 +    return FALSE;
 +
 +  switch (header.type)
@@ -392,7 +403,7 @@ index 0000000..a5a4df5
 +  int i;
 +
 +  poll_fds[0] = (struct pollfd) { .fd = urbdrc->stop_fd, .events = POLLIN };
-+  poll_fds[1] = (struct pollfd) { .fd = urbdrc->bridge_fd, .events = POLLIN };
++  poll_fds[1] = (struct pollfd) { .fd = urbdrc->broker_fd, .events = POLLIN };
 +
 +  for (i = 0; i < MAX_CHANNELS; ++i)
 +    {
@@ -421,14 +432,14 @@ index 0000000..a5a4df5
 +      return FALSE;
 +    }
 +
-+  /* Client data first: a frame from the bridge may close one of these channels */
++  /* Client data first: a frame from the broker may close one of these channels */
 +  for (n = 2; n < n_fds; ++n)
 +    {
 +      if (poll_fds[n].revents && !handle_channel_event (urbdrc, owners[n]))
 +        return FALSE;
 +    }
 +
-+  if (poll_fds[1].revents && !handle_bridge_frame (urbdrc))
++  if (poll_fds[1].revents && !handle_broker_frame (urbdrc))
 +    return FALSE;
 +
 +  for (i = 0; i < MAX_CHANNELS; ++i)
@@ -461,25 +472,24 @@ index 0000000..a5a4df5
 +
 +  if (!stop_requested)
 +    {
-+      g_message ("[RDP.URBDRC] Lost connection to rdp-usb-gw");
-+      grd_rdp_dvc_queue_channel_tear_down (GRD_RDP_DVC (urbdrc));
++      g_message ("[RDP.URBDRC] Lost connection to the USB redirection broker");
++      queue_channel_tear_down (urbdrc);
 +    }
 +
 +  return NULL;
 +}
 +
 +static int
-+connect_to_bridge (void)
++connect_to_broker (const char *path)
 +{
 +  struct sockaddr_un address = { .sun_family = AF_UNIX };
-+  const char *path;
 +  int fd;
 +
-+  path = g_getenv ("RDP_USB_GW_SOCKET");
-+  if (!path)
-+    path = BRIDGE_SOCKET_PATH;
 +  if (strlen (path) >= sizeof (address.sun_path))
-+    return -1;
++    {
++      errno = ENAMETOOLONG;
++      return -1;
++    }
 +  strcpy (address.sun_path, path);
 +
 +  fd = socket (AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -488,17 +498,19 @@ index 0000000..a5a4df5
 +
 +  if (connect (fd, (struct sockaddr *) &address, sizeof (address)) < 0)
 +    {
++      int saved_errno = errno;
++
 +      close (fd);
++      errno = saved_errno;
 +      return -1;
 +    }
 +
 +  return fd;
 +}
 +
-+static void
-+grd_rdp_dvc_urbdrc_maybe_init (GrdRdpDvc *dvc)
++void
++grd_rdp_dvc_urbdrc_maybe_init (GrdRdpDvcUrbdrc *urbdrc)
 +{
-+  GrdRdpDvcUrbdrc *urbdrc = GRD_RDP_DVC_URBDRC (dvc);
 +  PULONG session_id = NULL;
 +  DWORD returned = 0;
 +
@@ -506,12 +518,13 @@ index 0000000..a5a4df5
 +    return;
 +  urbdrc->started = TRUE;
 +
-+  urbdrc->bridge_fd = connect_to_bridge ();
-+  if (urbdrc->bridge_fd < 0)
++  urbdrc->broker_fd = connect_to_broker (urbdrc->socket_path);
++  if (urbdrc->broker_fd < 0)
 +    {
-+      g_message ("[RDP.URBDRC] rdp-usb-gw is not running, "
-+                 "USB redirection is unavailable");
-+      grd_rdp_dvc_queue_channel_tear_down (dvc);
++      g_message ("[RDP.URBDRC] Can't reach the USB redirection broker at %s: "
++                 "%s. USB redirection is unavailable",
++                 urbdrc->socket_path, g_strerror (errno));
++      queue_channel_tear_down (urbdrc);
 +      return;
 +    }
 +
@@ -520,7 +533,7 @@ index 0000000..a5a4df5
 +                                    &returned))
 +    {
 +      g_warning ("[RDP.URBDRC] Failed to query the session id");
-+      grd_rdp_dvc_queue_channel_tear_down (dvc);
++      queue_channel_tear_down (urbdrc);
 +      return;
 +    }
 +  urbdrc->session_id = (DWORD) *session_id;
@@ -534,18 +547,16 @@ index 0000000..a5a4df5
 +}
 +
 +GrdRdpDvcUrbdrc *
-+grd_rdp_dvc_urbdrc_new (GrdSessionRdp    *session_rdp,
-+                        GrdRdpDvcHandler *dvc_handler,
-+                        HANDLE            vcm)
++grd_rdp_dvc_urbdrc_new (GrdSessionRdp *session_rdp,
++                        HANDLE         vcm,
++                        const char    *socket_path)
 +{
 +  GrdRdpDvcUrbdrc *urbdrc;
 +
 +  urbdrc = g_object_new (GRD_TYPE_RDP_DVC_URBDRC, NULL);
++  urbdrc->session_rdp = session_rdp;
 +  urbdrc->vcm = vcm;
-+
-+  grd_rdp_dvc_initialize_base (GRD_RDP_DVC (urbdrc),
-+                               dvc_handler, session_rdp,
-+                               GRD_RDP_CHANNEL_URBDRC);
++  urbdrc->socket_path = g_strdup (socket_path);
 +
 +  return urbdrc;
 +}
@@ -565,36 +576,89 @@ index 0000000..a5a4df5
 +    }
 +
 +  g_clear_fd (&urbdrc->stop_fd, NULL);
-+  g_clear_fd (&urbdrc->bridge_fd, NULL);
++  g_clear_fd (&urbdrc->broker_fd, NULL);
++
++  if (urbdrc->channel_teardown_source)
++    {
++      g_source_destroy (urbdrc->channel_teardown_source);
++      g_clear_pointer (&urbdrc->channel_teardown_source, g_source_unref);
++    }
 +
 +  G_OBJECT_CLASS (grd_rdp_dvc_urbdrc_parent_class)->dispose (object);
 +}
 +
 +static void
++grd_rdp_dvc_urbdrc_finalize (GObject *object)
++{
++  GrdRdpDvcUrbdrc *urbdrc = GRD_RDP_DVC_URBDRC (object);
++
++  g_free (urbdrc->socket_path);
++
++  G_OBJECT_CLASS (grd_rdp_dvc_urbdrc_parent_class)->finalize (object);
++}
++
++static gboolean
++tear_down_channel (gpointer user_data)
++{
++  GrdRdpDvcUrbdrc *urbdrc = user_data;
++
++  g_debug ("[RDP.URBDRC] Tearing down channel");
++
++  g_clear_pointer (&urbdrc->channel_teardown_source, g_source_unref);
++
++  grd_session_rdp_tear_down_channel (urbdrc->session_rdp,
++                                     GRD_RDP_CHANNEL_URBDRC);
++
++  return G_SOURCE_REMOVE;
++}
++
++static gboolean
++source_dispatch (GSource     *source,
++                 GSourceFunc  callback,
++                 gpointer     user_data)
++{
++  g_source_set_ready_time (source, -1);
++
++  return callback (user_data);
++}
++
++static GSourceFuncs source_funcs =
++{
++  .dispatch = source_dispatch,
++};
++
++static void
 +grd_rdp_dvc_urbdrc_init (GrdRdpDvcUrbdrc *urbdrc)
 +{
++  GSource *channel_teardown_source;
++
 +  urbdrc->stop_fd = -1;
-+  urbdrc->bridge_fd = -1;
++  urbdrc->broker_fd = -1;
++
++  channel_teardown_source = g_source_new (&source_funcs, sizeof (GSource));
++  g_source_set_callback (channel_teardown_source, tear_down_channel,
++                         urbdrc, NULL);
++  g_source_set_ready_time (channel_teardown_source, -1);
++  g_source_attach (channel_teardown_source, NULL);
++  urbdrc->channel_teardown_source = channel_teardown_source;
 +}
 +
 +static void
 +grd_rdp_dvc_urbdrc_class_init (GrdRdpDvcUrbdrcClass *klass)
 +{
 +  GObjectClass *object_class = G_OBJECT_CLASS (klass);
-+  GrdRdpDvcClass *dvc_class = GRD_RDP_DVC_CLASS (klass);
 +
 +  object_class->dispose = grd_rdp_dvc_urbdrc_dispose;
-+
-+  dvc_class->maybe_init = grd_rdp_dvc_urbdrc_maybe_init;
++  object_class->finalize = grd_rdp_dvc_urbdrc_finalize;
 +}
 diff --git a/src/grd-rdp-dvc-urbdrc.h b/src/grd-rdp-dvc-urbdrc.h
 new file mode 100644
-index 0000000..3227b2a
+index 0000000..ba17d1e
 --- /dev/null
 +++ b/src/grd-rdp-dvc-urbdrc.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,35 @@
 +/*
-+ * Copyright (C) 2026 rdp-usb-gw contributors
++ * Copyright (C) 2026 Will Rouesnel
 + *
 + * This program is free software; you can redistribute it and/or
 + * modify it under the terms of the GNU General Public License as
@@ -614,51 +678,45 @@ index 0000000..3227b2a
 +
 +#pragma once
 +
-+#include "grd-rdp-dvc.h"
++#include <freerdp/freerdp.h>
++#include <glib-object.h>
++
++#include "grd-types.h"
 +
 +#define GRD_TYPE_RDP_DVC_URBDRC (grd_rdp_dvc_urbdrc_get_type ())
 +G_DECLARE_FINAL_TYPE (GrdRdpDvcUrbdrc, grd_rdp_dvc_urbdrc,
-+                      GRD, RDP_DVC_URBDRC, GrdRdpDvc)
++                      GRD, RDP_DVC_URBDRC, GObject)
 +
-+GrdRdpDvcUrbdrc *grd_rdp_dvc_urbdrc_new (GrdSessionRdp    *session_rdp,
-+                                         GrdRdpDvcHandler *dvc_handler,
-+                                         HANDLE            vcm);
-diff --git a/src/grd-rdp-dvc.c b/src/grd-rdp-dvc.c
-index 4c2210b..3e7b1a2 100644
---- a/src/grd-rdp-dvc.c
-+++ b/src/grd-rdp-dvc.c
-@@ -145,6 +145,8 @@ channel_to_string (GrdRdpChannel channel)
- #endif
-     case GRD_RDP_CHANNEL_TELEMETRY:
-       return "TELEMETRY";
-+    case GRD_RDP_CHANNEL_URBDRC:
-+      return "URBDRC";
-     }
- 
-   g_assert_not_reached ();
++GrdRdpDvcUrbdrc *grd_rdp_dvc_urbdrc_new (GrdSessionRdp *session_rdp,
++                                         HANDLE         vcm,
++                                         const char    *socket_path);
++
++void grd_rdp_dvc_urbdrc_maybe_init (GrdRdpDvcUrbdrc *urbdrc);
 diff --git a/src/grd-rdp-private.h b/src/grd-rdp-private.h
-index 1c280a8..0724f9f 100644
+index 0f65909..c76962a 100644
 --- a/src/grd-rdp-private.h
 +++ b/src/grd-rdp-private.h
-@@ -51,4 +51,5 @@ typedef struct _RdpPeerContext
- #endif
-   GrdRdpDvcTelemetry *telemetry;
-   GrdRdpDeviceRedirection *device_redirection;
+@@ -51,6 +51,7 @@ typedef struct _RdpPeerContext
+   GrdRdpDisplayControl *display_control;
+   GrdRdpGraphicsPipeline *graphics_pipeline;
+   GrdRdpTelemetry *telemetry;
 +  GrdRdpDvcUrbdrc *urbdrc;
  } RdpPeerContext;
+ 
+ #endif /* GRD_RDP_PRIVATE_H */
 diff --git a/src/grd-session-rdp.c b/src/grd-session-rdp.c
-index ba05225..9d8c8e0 100644
+index eaea1bb..214f5f5 100644
 --- a/src/grd-session-rdp.c
 +++ b/src/grd-session-rdp.c
-@@ -46,6 +46,7 @@
- #include "grd-rdp-dvc-input.h"
- #endif
- #include "grd-rdp-dvc-telemetry.h"
+@@ -51,6 +51,7 @@
+ #include "grd-rdp-session-metrics.h"
+ #include "grd-rdp-surface.h"
+ #include "grd-rdp-telemetry.h"
 +#include "grd-rdp-dvc-urbdrc.h"
- #include "grd-rdp-event-queue.h"
- #include "grd-rdp-layout-manager.h"
- #include "grd-rdp-network-autodetection.h"
-@@ -495,6 +496,9 @@ grd_session_rdp_tear_down_channel (GrdSessionRdp *session_rdp,
+ #include "grd-settings.h"
+ 
+ #define MAX_MONITOR_COUNT_HEADLESS 16
+@@ -522,6 +523,9 @@ grd_session_rdp_tear_down_channel (GrdSessionRdp *session_rdp,
      case GRD_RDP_CHANNEL_TELEMETRY:
        g_clear_object (&rdp_peer_context->telemetry);
        break;
@@ -668,92 +726,208 @@ index ba05225..9d8c8e0 100644
      }
    g_mutex_unlock (&rdp_peer_context->channel_mutex);
  }
-@@ -1795,6 +1799,7 @@ socket_thread_func (gpointer data)
+@@ -2089,6 +2093,7 @@ socket_thread_func (gpointer data)
            WTSVirtualChannelManagerIsChannelJoined (vcm, DRDYNVC_SVC_CHANNEL_NAME))
          {
-           GrdRdpDvcTelemetry *telemetry;
+           GrdRdpTelemetry *telemetry;
 +          GrdRdpDvcUrbdrc *urbdrc;
-           GrdRdpDvcGraphicsPipeline *graphics_pipeline;
- #if 0
-           GrdRdpDvcInput *input;
-@@ -1815,6 +1820,7 @@ socket_thread_func (gpointer data)
+           GrdRdpGraphicsPipeline *graphics_pipeline;
+           GrdRdpAudioPlayback *audio_playback;
+           GrdRdpDisplayControl *display_control;
+@@ -2106,6 +2111,7 @@ socket_thread_func (gpointer data)
              case DRDYNVC_STATE_READY:
                g_mutex_lock (&rdp_peer_context->channel_mutex);
                telemetry = rdp_peer_context->telemetry;
 +              urbdrc = rdp_peer_context->urbdrc;
                graphics_pipeline = rdp_peer_context->graphics_pipeline;
- #if 0
-               input = rdp_peer_context->input;
-@@ -1825,6 +1831,8 @@ socket_thread_func (gpointer data)
+               audio_playback = rdp_peer_context->audio_playback;
+               display_control = rdp_peer_context->display_control;
+@@ -2113,6 +2119,8 @@ socket_thread_func (gpointer data)
  
                if (telemetry && !session_rdp->session_should_stop)
-                 grd_rdp_dvc_maybe_init (GRD_RDP_DVC (telemetry));
+                 grd_rdp_telemetry_maybe_init (telemetry);
 +              if (urbdrc && !session_rdp->session_should_stop)
-+                grd_rdp_dvc_maybe_init (GRD_RDP_DVC (urbdrc));
++                grd_rdp_dvc_urbdrc_maybe_init (urbdrc);
                if (graphics_pipeline && !session_rdp->session_should_stop)
-                 grd_rdp_dvc_maybe_init (GRD_RDP_DVC (graphics_pipeline));
- #if 0
-@@ -1994,6 +2002,7 @@ grd_session_rdp_stop (GrdSession *session)
- #endif
+                 grd_rdp_graphics_pipeline_maybe_init (graphics_pipeline);
+               if (audio_playback && !session_rdp->session_should_stop)
+@@ -2289,6 +2297,7 @@ grd_session_rdp_stop (GrdSession *session)
+   g_clear_object (&rdp_peer_context->display_control);
    g_clear_object (&rdp_peer_context->graphics_pipeline);
    g_clear_object (&rdp_peer_context->telemetry);
 +  g_clear_object (&rdp_peer_context->urbdrc);
    g_mutex_unlock (&rdp_peer_context->channel_mutex);
  
    g_socket_shutdown (g_socket_connection_get_socket (session_rdp->connection),
-@@ -2048,6 +2057,7 @@ initialize_graphics_pipeline (GrdSessionRdp *session_rdp)
-   GrdRdpDvcTelemetry *telemetry;
+@@ -2340,6 +2349,9 @@ close_session_idle (gpointer user_data)
+ static void
+ maybe_initialize_graphics_pipeline (GrdSessionRdp *session_rdp)
+ {
++  GrdContext *context = grd_session_get_context (GRD_SESSION (session_rdp));
++  GrdSettings *settings = grd_context_get_settings (context);
++  g_autofree char *usb_redirection_socket = NULL;
+   rdpContext *rdp_context = session_rdp->peer->context;
+   RdpPeerContext *rdp_peer_context = (RdpPeerContext *) rdp_context;
+   rdpSettings *rdp_settings = rdp_context->settings;
+@@ -2347,8 +2359,19 @@ maybe_initialize_graphics_pipeline (GrdSessionRdp *session_rdp)
+   GrdRdpTelemetry *telemetry;
  
    g_assert (!rdp_peer_context->telemetry);
 +  g_assert (!rdp_peer_context->urbdrc);
    g_assert (!rdp_peer_context->graphics_pipeline);
  
-   telemetry = grd_rdp_dvc_telemetry_new (session_rdp,
-@@ -2056,6 +2066,10 @@ initialize_graphics_pipeline (GrdSessionRdp *session_rdp)
-                                          rdp_context);
-   rdp_peer_context->telemetry = telemetry;
- 
-+  rdp_peer_context->urbdrc = grd_rdp_dvc_urbdrc_new (session_rdp,
-+                                                     rdp_peer_context->dvc_handler,
-+                                                     rdp_peer_context->vcm);
++  g_object_get (G_OBJECT (settings),
++                "rdp-usb-redirection-socket", &usb_redirection_socket,
++                NULL);
++  if (usb_redirection_socket && *usb_redirection_socket)
++    {
++      rdp_peer_context->urbdrc =
++        grd_rdp_dvc_urbdrc_new (session_rdp, rdp_peer_context->vcm,
++                                usb_redirection_socket);
++    }
 +
-   graphics_pipeline =
-     grd_rdp_dvc_graphics_pipeline_new (session_rdp,
-                                        session_rdp->renderer,
+   if (!freerdp_settings_get_bool (rdp_settings, FreeRDP_SupportGraphicsPipeline))
+     return;
+ 
 diff --git a/src/grd-session-rdp.h b/src/grd-session-rdp.h
-index a6b112f..9db080f 100644
+index 8fb2b0b..6285924 100644
 --- a/src/grd-session-rdp.h
 +++ b/src/grd-session-rdp.h
-@@ -52,6 +52,7 @@ typedef enum _GrdRdpChannel
-   GRD_RDP_CHANNEL_INPUT,
- #endif
+@@ -49,6 +49,7 @@ typedef enum _GrdRdpChannel
+   GRD_RDP_CHANNEL_AUDIO_PLAYBACK,
+   GRD_RDP_CHANNEL_DISPLAY_CONTROL,
    GRD_RDP_CHANNEL_TELEMETRY,
 +  GRD_RDP_CHANNEL_URBDRC,
  } GrdRdpChannel;
  
  GrdSessionRdp *grd_session_rdp_new (GrdRdpServer      *rdp_server,
+diff --git a/src/grd-settings-user.c b/src/grd-settings-user.c
+index 20b81a9..fac9253 100644
+--- a/src/grd-settings-user.c
++++ b/src/grd-settings-user.c
+@@ -67,6 +67,9 @@ grd_settings_user_constructed (GObject *object)
+   g_settings_bind (settings->rdp_settings, "tls-key",
+                    settings, "rdp-server-key-path",
+                    G_SETTINGS_BIND_DEFAULT);
++  g_settings_bind (settings->rdp_settings, "usb-redirection-socket",
++                   settings, "rdp-usb-redirection-socket",
++                   G_SETTINGS_BIND_DEFAULT);
+   g_settings_bind (settings->vnc_settings, "port",
+                    settings, "vnc-port",
+                    G_SETTINGS_BIND_DEFAULT);
+diff --git a/src/grd-settings.c b/src/grd-settings.c
+index fba1d71..f7e2d83 100644
+--- a/src/grd-settings.c
++++ b/src/grd-settings.c
+@@ -58,6 +58,7 @@ enum
+   PROP_RDP_SERVER_CERT_PATH,
+   PROP_RDP_SERVER_KEY_PATH,
+   PROP_VNC_AUTH_METHOD,
++  PROP_RDP_USB_REDIRECTION_SOCKET,
+ };
+ 
+ typedef struct _GrdSettingsPrivate
+@@ -76,6 +77,7 @@ typedef struct _GrdSettingsPrivate
+     char *server_key;
+     char *server_cert_path;
+     char *server_key_path;
++    char *usb_redirection_socket;
+   } rdp;
+   struct {
+     int port;
+@@ -355,6 +357,7 @@ grd_settings_finalize (GObject *object)
+   g_clear_pointer (&priv->rdp.server_key, g_free);
+   g_clear_pointer (&priv->rdp.server_cert_path, g_free);
+   g_clear_pointer (&priv->rdp.server_key_path, g_free);
++  g_clear_pointer (&priv->rdp.usb_redirection_socket, g_free);
+   g_clear_object (&priv->credentials);
+ 
+   G_OBJECT_CLASS (grd_settings_parent_class)->finalize (object);
+@@ -419,6 +422,9 @@ grd_settings_get_property (GObject    *object,
+     case PROP_RDP_SERVER_KEY_PATH:
+       g_value_set_string (value, priv->rdp.server_key_path);
+       break;
++    case PROP_RDP_USB_REDIRECTION_SOCKET:
++      g_value_set_string (value, priv->rdp.usb_redirection_socket);
++      break;
+     case PROP_VNC_AUTH_METHOD:
+       if (g_getenv ("GNOME_REMOTE_DESKTOP_TEST_VNC_PASSWORD"))
+         g_value_set_enum (value, GRD_VNC_AUTH_METHOD_PASSWORD);
+@@ -559,6 +565,10 @@ grd_settings_set_property (GObject      *object,
+       priv->rdp.server_key_path = g_strdup (g_value_get_string (value));
+       update_rdp_server_key (settings);
+       break;
++    case PROP_RDP_USB_REDIRECTION_SOCKET:
++      g_clear_pointer (&priv->rdp.usb_redirection_socket, g_free);
++      priv->rdp.usb_redirection_socket = g_value_dup_string (value);
++      break;
+     case PROP_VNC_AUTH_METHOD:
+       priv->vnc.auth_method = g_value_get_enum (value);
+       break;
+@@ -733,6 +743,15 @@ grd_settings_class_init (GrdSettingsClass *klass)
+                                                         G_PARAM_READWRITE |
+                                                         G_PARAM_CONSTRUCT |
+                                                         G_PARAM_STATIC_STRINGS));
++  g_object_class_install_property (object_class,
++                                   PROP_RDP_USB_REDIRECTION_SOCKET,
++                                   g_param_spec_string ("rdp-usb-redirection-socket",
++                                                        "rdp usb redirection socket",
++                                                        "rdp usb redirection socket",
++                                                        NULL,
++                                                        G_PARAM_READWRITE |
++                                                        G_PARAM_CONSTRUCT |
++                                                        G_PARAM_STATIC_STRINGS));
+   g_object_class_install_property (object_class,
+                                    PROP_VNC_AUTH_METHOD,
+                                    g_param_spec_enum ("vnc-auth-method",
 diff --git a/src/grd-types.h b/src/grd-types.h
-index 84af5f8..d7519b5 100644
+index 28ee0a5..bb6c5a5 100644
 --- a/src/grd-types.h
 +++ b/src/grd-types.h
-@@ -57,6 +57,7 @@ typedef struct _GrdRdpDvcHandler GrdRdpDvcHandler;
- typedef struct _GrdRdpDvcInput GrdRdpDvcInput;
- #endif
- typedef struct _GrdRdpDvcTelemetry GrdRdpDvcTelemetry;
+@@ -57,6 +57,7 @@ typedef struct _GrdRdpSessionMetrics GrdRdpSessionMetrics;
+ typedef struct _GrdRdpStreamOwner GrdRdpStreamOwner;
+ typedef struct _GrdRdpSurface GrdRdpSurface;
+ typedef struct _GrdRdpSurfaceRenderer GrdRdpSurfaceRenderer;
 +typedef struct _GrdRdpDvcUrbdrc GrdRdpDvcUrbdrc;
- typedef struct _GrdRdpEventQueue GrdRdpEventQueue;
- typedef struct _GrdRdpFrame GrdRdpFrame;
- typedef struct _GrdRdpFrameStats GrdRdpFrameStats;
+ typedef struct _GrdRdpTelemetry GrdRdpTelemetry;
+ typedef struct _GrdSession GrdSession;
+ typedef struct _GrdSessionRdp GrdSessionRdp;
 diff --git a/src/meson.build b/src/meson.build
-index 245aceb..5d912df 100644
+index 716a416..579a247 100644
 --- a/src/meson.build
 +++ b/src/meson.build
-@@ -157,6 +157,8 @@ if have_rdp
-     #'grd-rdp-dvc-input.h',
-     'grd-rdp-dvc-telemetry.c',
-     'grd-rdp-dvc-telemetry.h',
+@@ -151,6 +151,8 @@ if have_rdp
+     'grd-rdp-surface.h',
+     'grd-rdp-surface-renderer.c',
+     'grd-rdp-surface-renderer.h',
 +    'grd-rdp-dvc-urbdrc.c',
 +    'grd-rdp-dvc-urbdrc.h',
-     'grd-rdp-event-queue.c',
-     'grd-rdp-event-queue.h',
-     'grd-rdp-frame.c',
+     'grd-rdp-telemetry.c',
+     'grd-rdp-telemetry.h',
+     'grd-session-rdp.c',
+diff --git a/src/org.gnome.desktop.remote-desktop.gschema.xml.in b/src/org.gnome.desktop.remote-desktop.gschema.xml.in
+index c3d583c..3497009 100644
+--- a/src/org.gnome.desktop.remote-desktop.gschema.xml.in
++++ b/src/org.gnome.desktop.remote-desktop.gschema.xml.in
+@@ -68,6 +68,18 @@
+         file and the certificate file need to be provided to the RDP server.
+       </description>
+     </key>
++    <key name='usb-redirection-socket' type='s'>
++      <default>''</default>
++      <summary>A path to the socket of a USB redirection broker</summary>
++      <description>
++        RDP clients can redirect USB devices over the URBDRC dynamic virtual
++        channel. When this is set, each RDP session connects to the USB
++        redirection broker listening on this unix socket, and lends it the
++        session's URBDRC channels. The broker handles the USB traffic and makes
++        the devices appear on this machine. See docs/usb-redirection.md for the
++        protocol. When empty, USB redirection is unavailable.
++      </description>
++    </key>
+     <key name='view-only' type='b'>
+       <default>true</default>
+       <summary>Only allow remote connections to view the screen content</summary>
+-- 
+2.53.0
+

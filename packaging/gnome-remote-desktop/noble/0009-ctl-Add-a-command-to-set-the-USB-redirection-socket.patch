@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Will Rouesnel <wrouesnel@wrouesnel.com>
+Date: Fri, 20 Nov 2026 07:27:52 +1100
+Subject: [PATCH] ctl: Add a command to set the USB redirection socket
+
+Add "rdp set-usb-redirection-socket", which sets the path to a USB
+redirection broker's socket, or turns USB redirection off when given an
+empty path. Show the setting in "status".
+---
+ man/grdctl.txt |  5 +++++
+ src/grd-ctl.c  | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 33 insertions(+)
+
+diff --git a/man/grdctl.txt b/man/grdctl.txt
+index 4f359bf..c1879dd 100644
+--- a/man/grdctl.txt
++++ b/man/grdctl.txt
+@@ -43,6 +43,11 @@ Set path to TLS certificate.
+ *rdp* *set-tls-key* 'TLS-KEY'::
+ Set path to TLS key.
+ 
++*rdp* *set-usb-redirection-socket* 'SOCKET-PATH'::
++Set the path to the unix socket of a USB redirection broker. RDP sessions lend
++the client's USB redirection channels to the broker, which makes the devices
++appear on this machine. An empty path turns USB redirection off.
++
+ *rdp* *set-credentials* 'USERNAME' 'PASSWORD'::
+ Set username and password credentials.
+ 
+diff --git a/src/grd-ctl.c b/src/grd-ctl.c
+index 9549b12..6bc019d 100644
+--- a/src/grd-ctl.c
++++ b/src/grd-ctl.c
+@@ -428,6 +428,25 @@ prompt_for_input (const char  *prompt,
+   return g_steal_pointer (&input);
+ }
+ 
++static gboolean
++rdp_set_usb_redirection_socket (GrdSettings  *settings,
++                                int           argc,
++                                char        **argv,
++                                GError      **error)
++{
++  char *path = argv[0];
++
++  if (*path && !g_path_is_absolute (path))
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
++                   "Path to USB redirection socket not absolute");
++      return FALSE;
++    }
++
++  g_object_set (G_OBJECT (settings), "rdp-usb-redirection-socket", path, NULL);
++  return TRUE;
++}
++
+ static gboolean
+ rdp_set_credentials (GrdSettings  *settings,
+                      int           argc,
+@@ -519,6 +538,7 @@ static const SubCommand rdp_subcommands[] = {
+   { "disable", rdp_disable, 0 },
+   { "set-tls-cert", rdp_set_tls_cert, 1 },
+   { "set-tls-key", rdp_set_tls_key, 1 },
++  { "set-usb-redirection-socket", rdp_set_usb_redirection_socket, 1 },
+   { "set-credentials", rdp_set_credentials, 0 },
+   { "set-credentials", rdp_set_credentials, 1 },
+   { "set-credentials", rdp_set_credentials, 2 },
+@@ -735,6 +755,9 @@ print_help (void)
+       "    disable                                      - Disable the RDP backend\n"
+       "    set-tls-cert <path-to-cert>                  - Set path to TLS certificate\n"
+       "    set-tls-key <path-to-key>                    - Set path to TLS key\n"
++      "    set-usb-redirection-socket <path-to-socket>  - Set path to a USB redirection\n"
++      "                                                   broker's socket, or \"\" to\n"
++      "                                                   turn USB redirection off\n"
+       "    set-credentials [<username> [<password>]]    - Set username and password\n"
+       "                                                   credentials\n"
+       "    clear-credentials                            - Clear username and password\n"
+@@ -845,6 +868,7 @@ print_rdp_status (GrdSettings *settings,
+   g_autofree char *tls_fingerprint = NULL;
+   g_autofree char *tls_cert = NULL;
+   g_autofree char *tls_key = NULL;
++  g_autofree char *usb_redirection_socket = NULL;
+   g_autofree char *username = NULL;
+   g_autofree char *password = NULL;
+   g_autoptr (GError) error = NULL;
+@@ -857,6 +881,7 @@ print_rdp_status (GrdSettings *settings,
+                 "rdp-server-fingerprint", &tls_fingerprint,
+                 "rdp-server-cert-path", &tls_cert,
+                 "rdp-server-key-path", &tls_key,
++                "rdp-usb-redirection-socket", &usb_redirection_socket,
+                 "rdp-negotiate-port", &negotiate_port,
+                 "rdp-view-only", &view_only,
+                 "rdp-enabled", &enabled,
+@@ -869,6 +894,9 @@ print_rdp_status (GrdSettings *settings,
+   printf ("\tTLS certificate: %s\n", tls_cert);
+   printf ("\tTLS fingerprint: %s\n", tls_fingerprint);
+   printf ("\tTLS key: %s\n", tls_key);
++  printf ("\tUSB redirection socket: %s\n",
++          usb_redirection_socket && *usb_redirection_socket ?
++          usb_redirection_socket : "(none)");
+   if (!GRD_IS_SETTINGS_SYSTEM (settings))
+     {
+       printf ("\tView-only: %s\n", view_only ? "yes" : "no");
+-- 
+2.53.0
+

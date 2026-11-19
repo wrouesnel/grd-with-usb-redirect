@@ -187,10 +187,10 @@ index 2180126..11351a4 100644
  
    g_object_class_install_property (object_class,
 diff --git a/src/grd-session-rdp.c b/src/grd-session-rdp.c
-index 0046913..58e94a8 100644
+index 4468abb..81a646b 100644
 --- a/src/grd-session-rdp.c
 +++ b/src/grd-session-rdp.c
-@@ -1916,7 +1916,7 @@ grd_session_rdp_stop (GrdSession *session)
+@@ -1907,7 +1907,7 @@ grd_session_rdp_stop (GrdSession *session)
    g_clear_object (&session_rdp->renderer);
  
    peer->Close (peer);
@@ -199,3 +199,6 @@ index 0046913..58e94a8 100644
  
    g_clear_object (&rdp_peer_context->network_autodetection);
  
+-- 
+2.53.0
+

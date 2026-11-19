@@ -1,0 +1,201 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Will Rouesnel <wrouesnel@wrouesnel.com>
+Date: Fri, 20 Nov 2026 07:59:40 +1100
+Subject: [PATCH] rdp: Support USB redirection with remote login
+
+With remote login, the system daemon hands each client to a
+gnome-remote-desktop instance running in a user session: first the login
+screen's, then the user's own once they log in. Those instances have no
+settings of their own, so they never connected to a USB redirection
+broker.
+
+Read usb-redirection-socket from the system daemon's grd.conf, settable
+with "grdctl --system rdp set-usb-redirection-socket", and pass it to the
+handover instances through a new UsbRedirectionSocket property on the
+handover interface. A property rather than a new StartHandover argument
+keeps a system daemon and a handover instance of different versions
+working together; an older system daemon just leaves USB redirection
+off.
+
+A device redirected on the login screen is attached to the whole
+machine, so PAM modules can use it to log in, for example a security key
+with pam_u2f. When the user logs in, the login screen's connection to
+the broker closes and the user session's opens, and the client offers
+its devices again.
+---
+ docs/usb-redirection.md         | 53 ++++++++++++++++++++++++++-------
+ src/grd-daemon-handover.c       |  2 ++
+ src/grd-daemon-system.c         | 11 +++++++
+ src/grd-settings-system.c       | 17 +++++++++++
+ src/org.gnome.RemoteDesktop.xml |  9 ++++++
+ 5 files changed, 81 insertions(+), 11 deletions(-)
+
+diff --git a/docs/usb-redirection.md b/docs/usb-redirection.md
+index 9ab204c..8543e8c 100644
+--- a/docs/usb-redirection.md
++++ b/docs/usb-redirection.md
+@@ -18,22 +18,53 @@ the broker asks, and relays their messages.
+ 
+ ## Configuration
+ 
+-Set `usb-redirection-socket` to the broker's socket, in
+-`org.gnome.desktop.remote-desktop.rdp` for a remote assistance or remote
+-desktop session, or in `org.gnome.desktop.remote-desktop.rdp.headless` for a
+-headless session:
++Set the path to the broker's socket with `grdctl`. For a remote assistance or
++remote desktop session:
+ 
+ ```
+-gsettings set org.gnome.desktop.remote-desktop.rdp.headless \
+-    usb-redirection-socket /run/example-broker/channel.sock
++grdctl rdp set-usb-redirection-socket /run/example-broker/channel.sock
+ ```
+ 
+-The user running `gnome-remote-desktop` must be allowed to connect to that
+-socket. When the setting is empty, which is the default, USB redirection is
+-unavailable. When the setting is set but nothing is listening, sessions carry on
+-without USB redirection.
++For a headless session, add `--headless`. For remote login, add `--system`:
+ 
+-Sessions on the login screen, run by the system daemon, don't use a broker.
++```
++grdctl --system rdp set-usb-redirection-socket /run/example-broker/channel.sock
++```
++
++This sets `usb-redirection-socket` in the `org.gnome.desktop.remote-desktop.rdp`
++or `org.gnome.desktop.remote-desktop.rdp.headless` schema, or in the system
++daemon's `grd.conf`. An empty path, which is the default, turns USB redirection
++off. When the path is set but nothing is listening, sessions carry on without
++USB redirection.
++
++The user running the session's `gnome-remote-desktop` must be allowed to
++connect to the socket.
++
++### Remote login
++
++With remote login, the system daemon passes the socket path to the
++`gnome-remote-desktop` instance that runs each session: first the one on the
++login screen, then the one in the user's session after they log in. Each of
++them connects to the broker, so a redirected device is available on the login
++screen. Because a device attached through the broker is visible to the whole
++machine, PAM modules can use it to log in, for example a security key with
++`pam_u2f`, or a fingerprint reader with `fprintd`.
++
++When the user logs in, the client is handed over to the user's session, and
++the broker sees the login screen's connection close and a new one open. The
++client offers its devices again on the new connection, so they are detached and
++attached again.
++
++On the login screen, `gnome-remote-desktop` runs as the login screen's user.
++Recent versions of GDM create those users as needed (`gdm-greeter`,
++`gdm-greeter-2`, …), all with the primary group `gdm`, so a broker that should
++serve the login screen has to let that group connect.
++
++On the login screen, the remote side has only passed the system daemon's RDP
++credentials, not logged in as a user. Attaching USB devices there exposes the
++host's USB drivers to that client. A broker that should only serve logged-in
++users can refuse connections from the login screen's user, which it can tell
++from the socket peer's credentials (`SO_PEERCRED`).
+ 
+ ---
+ 
+diff --git a/src/grd-daemon-handover.c b/src/grd-daemon-handover.c
+index 947e0e1..10a3af2 100644
+--- a/src/grd-daemon-handover.c
++++ b/src/grd-daemon-handover.c
+@@ -268,6 +268,8 @@ on_start_handover_finished (GObject      *object,
+   g_object_set (G_OBJECT (settings),
+                 "rdp-server-cert", certificate,
+                 "rdp-server-key", key,
++                "rdp-usb-redirection-socket",
++                grd_dbus_remote_desktop_rdp_handover_get_usb_redirection_socket (proxy),
+                 NULL);
+ }
+ 
+diff --git a/src/grd-daemon-system.c b/src/grd-daemon-system.c
+index 348bc52..663a1f3 100644
+--- a/src/grd-daemon-system.c
++++ b/src/grd-daemon-system.c
+@@ -455,6 +455,10 @@ static HandoverInterface *
+ handover_iface_new (const char      *session_id,
+                     GrdRemoteClient *remote_client)
+ {
++  GrdDaemon *daemon = GRD_DAEMON (remote_client->daemon_system);
++  GrdContext *context = grd_daemon_get_context (daemon);
++  GrdSettings *settings = grd_context_get_settings (context);
++  g_autofree char *usb_redirection_socket = NULL;
+   HandoverInterface *handover;
+ 
+   handover = g_new0 (HandoverInterface, 1);
+@@ -478,6 +482,13 @@ handover_iface_new (const char      *session_id,
+   grd_dbus_remote_desktop_rdp_handover_set_handover_is_waiting (
+     handover->interface, remote_client->needs_handover);
+ 
++  g_object_get (G_OBJECT (settings),
++                "rdp-usb-redirection-socket", &usb_redirection_socket,
++                NULL);
++  grd_dbus_remote_desktop_rdp_handover_set_usb_redirection_socket (
++    handover->interface,
++    usb_redirection_socket ? usb_redirection_socket : "");
++
+   return handover;
+ }
+ 
+diff --git a/src/grd-settings-system.c b/src/grd-settings-system.c
+index a5eb35c..c4f41dd 100644
+--- a/src/grd-settings-system.c
++++ b/src/grd-settings-system.c
+@@ -374,6 +374,22 @@ write_string (GrdSettingsSystem *settings_system,
+                          value);
+ }
+ 
++static void
++read_string (GrdSettingsSystem *settings_system,
++             GKeyFile          *key_file,
++             const char        *group,
++             const char        *key,
++             const char        *settings_name)
++{
++  g_autofree char *value = NULL;
++
++  value = g_key_file_get_string (key_file, group, key, NULL);
++  if (!value)
++    return;
++
++  g_object_set (G_OBJECT (settings_system), settings_name, value, NULL);
++}
++
+ static void
+ read_filename (GrdSettingsSystem *settings_system,
+                GKeyFile          *key_file,
+@@ -568,6 +584,7 @@ static const FileSetting rdp_file_settings[] =
+   { "port", "rdp-port", read_int, write_int },
+   { "auth-methods", "rdp-auth-methods", read_flags, write_flags },
+   { "kerberos-keytab", "rdp-kerberos-keytab", read_filename, write_string },
++  { "usb-redirection-socket", "rdp-usb-redirection-socket", read_string, write_string },
+ };
+ 
+ static void
+diff --git a/src/org.gnome.RemoteDesktop.xml b/src/org.gnome.RemoteDesktop.xml
+index d42bf93..7d027e8 100644
+--- a/src/org.gnome.RemoteDesktop.xml
++++ b/src/org.gnome.RemoteDesktop.xml
+@@ -207,6 +207,15 @@
+      -->
+     <property name="HandoverIsWaiting" type="b" access="read" />
+ 
++    <!--
++        UsbRedirectionSocket:
++
++        The path to the socket of the USB redirection broker the dst server
++        should lend the session's URBDRC channels to, or an empty string if
++        USB redirection is off.
++     -->
++    <property name="UsbRedirectionSocket" type="s" access="read" />
++
+   </interface>
+ 
+ </node>
+-- 
+2.53.0
+

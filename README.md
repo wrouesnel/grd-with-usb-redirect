@@ -12,7 +12,7 @@ package, so you can install only the parts you want.
 | Package | What it does |
 | --- | --- |
 | `rdp-usb-gw` | The USB redirection daemon, from [rdp-usb-gw](https://github.com/wrouesnel/rdp-usb-gw). It works with any RDP server that has a proxy for it. |
-| `gnome-remote-desktop` | The distribution's gnome-remote-desktop, rebuilt with a proxy for rdp-usb-gw and the fixes below. |
+| `gnome-remote-desktop` | The distribution's gnome-remote-desktop, rebuilt with USB redirection through rdp-usb-gw and the fixes below. |
 | `gdm3` (Ubuntu 24.04 only) | Ubuntu's gdm, rebuilt with `gdm-new-session` and `gnome-headless-session@.service`, backported from gdm 50. |
 | `grd-headless-session` | Starts a user's headless session at boot, and gives it a TLS certificate. |
 | `grd-no-lockscreen` | Turns off GNOME's lock screen for every user. |
@@ -73,12 +73,31 @@ changed. A certificate you configured yourself with `grdctl` is left alone.
 Ubuntu it also installs `/etc/dconf/profile/user`, which Ubuntu doesn't have, so that
 database is read.
 
+## USB redirection
+
+The rebuilt gnome-remote-desktop lends each RDP session's USB redirection channels
+(URBDRC) to a broker over a unix socket, set by `usb-redirection-socket`. These builds
+default it to rdp-usb-gw's socket, so installing rdp-usb-gw is enough for user and
+headless sessions. To use another socket, or turn it off with an empty path:
+
+```sh
+grdctl rdp set-usb-redirection-socket /run/rdp-usb-gw/channel.sock      # user session
+grdctl --system rdp set-usb-redirection-socket /run/rdp-usb-gw/channel.sock  # remote login
+```
+
+With GNOME remote login, the login screen also connects to the broker, so a security key
+or fingerprint reader redirected from the client can be used to log in, with PAM modules
+such as `pam_u2f`. rdp-usb-gw refuses the login screen unless it's allowed; see
+[its README](https://github.com/wrouesnel/rdp-usb-gw#the-login-screen). After login,
+the client offers its devices again to the user's session.
+
 ## What's changed in gnome-remote-desktop
 
 | Change | 46 (Ubuntu 24.04) | 49 (EL10) | 50 (Ubuntu 26.04) | Upstream |
 | --- | --- | --- | --- | --- |
-| Proxy URBDRC channels to rdp-usb-gw | Ported | Added | Added | Not submitted yet |
-| grdctl crashed reading credentials from a pipe | Fixed | Fixed | Fixed | Not submitted yet |
+| USB redirection through a broker socket, with a setting, grdctl command and remote login | Ported | Added | Added | Not submitted yet |
+| The socket defaults to rdp-usb-gw's | Downstream only | Downstream only | Downstream only | Not for upstream |
+| grdctl crashed reading credentials from a pipe | Fixed | Fixed | Fixed | [MR 459](https://gitlab.gnome.org/GNOME/gnome-remote-desktop/-/merge_requests/459) |
 | grdctl reads credentials from stdin, not the command line | Backported from 47 | Already there | Already there | In 47 |
 | A client stalling during the TLS handshake could hang the daemon | Socket shutdown backported | Already fixed by Red Hat | Backported | [MR 436](https://gitlab.gnome.org/GNOME/gnome-remote-desktop/-/merge_requests/436) |
 

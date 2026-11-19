@@ -99,3 +99,6 @@ index bb5052d..a5aef8c 100644
    g_clear_pointer (&peer->connect_timestamps, g_array_unref);
    g_clear_pointer (&peer->name, g_free);
    g_free (peer);
+-- 
+2.53.0
+

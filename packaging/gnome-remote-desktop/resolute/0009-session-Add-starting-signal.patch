@@ -47,3 +47,6 @@ index c2a8682..7f452d0 100644
    signals[STARTED] = g_signal_new ("started",
                                     G_TYPE_FROM_CLASS (klass),
                                     G_SIGNAL_RUN_LAST,
+-- 
+2.53.0
+

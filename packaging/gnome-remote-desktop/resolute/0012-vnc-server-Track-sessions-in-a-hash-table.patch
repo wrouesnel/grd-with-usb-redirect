@@ -157,3 +157,6 @@ index 49f1605..c1ed674 100644
    object_class->constructed = grd_vnc_server_constructed;
  
    g_object_class_install_property (object_class,
+-- 
+2.53.0
+

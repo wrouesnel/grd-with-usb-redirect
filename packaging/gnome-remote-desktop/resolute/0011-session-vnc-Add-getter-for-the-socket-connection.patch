@@ -41,3 +41,6 @@ index d501950..625cb93 100644
  GrdVncServer * grd_session_vnc_get_server (GrdSessionVnc *session_vnc);
 +
 +GSocketConnection * grd_session_vnc_get_socket_connection (GrdSessionVnc *session_vnc);
+-- 
+2.53.0
+

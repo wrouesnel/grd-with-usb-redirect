@@ -56,3 +56,6 @@ index cba7e3e..d501950 100644
  void grd_session_vnc_notify_error (GrdSessionVnc *session_vnc);
 +
 +GrdVncServer * grd_session_vnc_get_server (GrdSessionVnc *session_vnc);
+-- 
+2.53.0
+

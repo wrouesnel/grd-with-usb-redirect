@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Will Rouesnel <wrouesnel@wrouesnel.com>
+Date: Fri, 20 Nov 2026 07:11:22 +1100
+Subject: [PATCH] tests: Add a test for USB redirection through a broker
+
+An RDP client can redirect USB devices over the URBDRC dynamic virtual
+channel. Handling that channel's traffic means making the devices appear
+on the host, which a separate, privileged broker should do rather than
+gnome-remote-desktop. gnome-remote-desktop's part is to lend the session's
+URBDRC channels to that broker over a unix socket.
+
+Run a fake broker during the RDP test. Set the usb-redirection-socket
+setting to its socket, wait for the server to connect, and ask for one
+channel. The test client doesn't support URBDRC, so the server must
+answer that the channel was closed.
+
+This test fails: the usb-redirection-socket setting doesn't exist.
+---
+ tests/run-rdp-tests.py | 58 +++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 57 insertions(+), 1 deletion(-)
+
+diff --git a/tests/run-rdp-tests.py b/tests/run-rdp-tests.py
+index f7cedbe..b53de36 100755
+--- a/tests/run-rdp-tests.py
++++ b/tests/run-rdp-tests.py
+@@ -2,6 +2,9 @@
+ 
+ import dbus
+ import os
++import socket
++import struct
++import threading
+ import time
+ import os.path
+ import subprocess
+@@ -19,6 +22,12 @@ bus = dbus.SessionBus()
+ 
+ rdp_client_failed = None
+ rdp_server_failed = None
++usb_broker_failed = None
++usb_broker_thread = None
++
++USB_BROKER_FRAME_OPEN = 1
++USB_BROKER_FRAME_OPENED = 2
++USB_BROKER_FRAME_CLOSED = 5
+ 
+ os.environ['GNOME_REMOTE_DESKTOP_TEST_RDP_USERNAME'] = 'TestU'
+ os.environ['GNOME_REMOTE_DESKTOP_TEST_RDP_PASSWORD'] = 'TestPw'
+@@ -37,6 +46,51 @@ def run_rdp_test_client():
+   else:
+     rdp_client_failed = False
+ 
++def run_usb_broker(listener):
++  # Stands in for a USB redirection broker. The test client has no URBDRC
++  # support, so the channel the broker asks for must come back refused.
++  global usb_broker_failed
++  usb_broker_failed = True
++  listener.settimeout(15)
++  try:
++    connection, _ = listener.accept()
++  except socket.timeout:
++    print("USB redirection broker: the server never connected")
++    return
++  with connection:
++    connection.settimeout(10)
++    print("USB redirection broker: server connected, opening a channel")
++    connection.sendall(struct.pack('=III', USB_BROKER_FRAME_OPEN, 1, 0))
++    try:
++      header = b''
++      while len(header) < 12:
++        data = connection.recv(12 - len(header))
++        if not data:
++          break
++        header += data
++    except socket.timeout:
++      header = b''
++    if len(header) < 12:
++      print("USB redirection broker: no answer to the open request")
++      return
++    frame_type, channel, length = struct.unpack('=III', header)
++    if frame_type != USB_BROKER_FRAME_CLOSED or channel != 1 or length != 0:
++      print("USB redirection broker: unexpected frame %u for channel %u"%(frame_type, channel))
++      return
++    print("USB redirection broker: the client refused the channel, as expected")
++    usb_broker_failed = False
++
++def start_usb_broker():
++  global usb_broker_thread
++  socket_path = os.path.join(os.getenv("XDG_RUNTIME_DIR"), 'usb-broker.sock')
++  listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++  listener.bind(socket_path)
++  listener.listen(1)
++  subprocess.run(['gsettings', 'set', 'org.gnome.desktop.remote-desktop.rdp.headless',
++                  'usb-redirection-socket', socket_path], check=True)
++  usb_broker_thread = threading.Thread(target=run_usb_broker, args=(listener,))
++  usb_broker_thread.start()
++
+ def start_rdp_server():
+   print("Starting RDP server")
+   global rdp_server
+@@ -64,6 +118,7 @@ def remote_desktop_name_appeared_cb(name):
+   print("Remote desktop capable display server appeared")
+   start_rdp_server()
+   run_rdp_test_client()
++  usb_broker_thread.join()
+   stop_rdp_server()
+   stop_mutter()
+ 
+@@ -92,11 +147,12 @@ def stop_mutter():
+ bus.watch_name_owner('org.gnome.Mutter.RemoteDesktop',
+                      remote_desktop_name_appeared_cb)
+ 
++start_usb_broker()
+ start_mutter()
+ 
+ loop.run()
+ 
+-if rdp_server_failed != False or rdp_client_failed != False:
++if rdp_server_failed != False or rdp_client_failed != False or usb_broker_failed != False:
+   sys.exit(1)
+ else:
+   sys.exit(0)
+-- 
+2.53.0
+
