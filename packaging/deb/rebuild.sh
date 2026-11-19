@@ -29,7 +29,7 @@ mkdir /build && cd /build
 apt-get source -qq --only-source "$SOURCE=$VERSION" >/dev/null
 cd "$(find . -mindepth 1 -maxdepth 1 -type d | head -1)"
 mkdir -p debian/patches/grd-with-usb-redirect
-for p in /target/*.patch; do
+for p in $(ls /target/*.patch 2>/dev/null); do
     cp "$p" debian/patches/grd-with-usb-redirect/
     echo "grd-with-usb-redirect/$(basename "$p")" >> debian/patches/series
 done
@@ -37,7 +37,7 @@ if [ -x /target/prepare.sh ]; then /target/prepare.sh; fi
 DEBFULLNAME=${MAINT% <*} DEBEMAIL=${MAINT#*<}; DEBEMAIL=${DEBEMAIL%>}
 export DEBFULLNAME DEBEMAIL
 dch -v "$VERSION+grdusb$REVISION" -D "$SERIES" --force-distribution "$CHANGES"
-QUILT_PATCHES=debian/patches quilt push -aq >/dev/null
+QUILT_PATCHES=debian/patches quilt push -aq >/dev/null || [ $? -eq 2 ]  # 2: nothing to apply
 QUILT_PATCHES=debian/patches quilt pop -aq >/dev/null
 rm -rf .pc
 # debian/rules clean, run for the source package too, needs the build dependencies.

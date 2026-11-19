@@ -1,0 +1,38 @@
+From 913e98668b18466115cc2c8cfb42d1d9de24804c Mon Sep 17 00:00:00 2001
+From: Will Rouesnel <wrouesnel@wrouesnel.com>
+Date: Fri, 20 Nov 2026 00:12:41 +1100
+Subject: [PATCH] data: Allow gnome-headless-session@ with older polkit
+
+polkit 124, in Ubuntu 24.04, doesn't give rules subject.system_unit, so
+the rule never allowed gdm-new-session to create the user's display.
+
+There, allow a gdm caller that isn't in a login session while the
+user's gnome-headless-session@ unit is running.
+---
+ data/polkit-gdm.rules.in | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/data/polkit-gdm.rules.in b/data/polkit-gdm.rules.in
+index dae51f5..8079a78 100644
+--- a/data/polkit-gdm.rules.in
++++ b/data/polkit-gdm.rules.in
+@@ -11,5 +11,19 @@ polkit.addRule(function(action, subject) {
+             if (match && user == match[1])
+                 return polkit.Result.YES;
+         }
++
++        /* Older polkit, such as 124, doesn't say which unit the caller is in. Allow a
++         * caller outside any login session while the user's headless
++         * session unit is running, since that unit is what asks. */
++        if (user && !system_unit && !subject.session &&
++            /^[A-Za-z0-9_][A-Za-z0-9_.-]*\$?$/.test(user)) {
++            try {
++                polkit.spawn(["systemctl", "--quiet", "is-active",
++                              "gnome-headless-session@" + user + ".service"]);
++                return polkit.Result.YES;
++            } catch (error) {
++                return undefined;
++            }
++        }
+     }
+ });

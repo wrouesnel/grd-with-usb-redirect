@@ -79,7 +79,9 @@ enable)
     as_user systemctl --user enable gnome-remote-desktop-headless.service
     systemctl enable "$session_unit"
     if [ -n "$start" ]; then
-        systemctl restart "$session_unit"
+        # Not restart: gdm is slow to close a session, so starting a new one
+        # straight after fails and leaves the old one running untracked.
+        systemctl start "$session_unit"
         as_user systemctl --user restart gnome-remote-desktop-headless.service
     else
         echo "Enabled. The session starts at the next boot, or now with: systemctl start $session_unit"
