@@ -53,11 +53,32 @@ wait_for_user_bus() {
     done
 }
 
+# A distribution update to gdm or gnome-remote-desktop replaces the patched
+# builds this needs (they're marked grdusb in the version) without a word.
+check_patched_builds() {
+    for pkg in gdm3 gdm gnome-remote-desktop; do
+        if command -v dpkg-query >/dev/null; then
+            v=$(dpkg-query -W -f '${db:Status-Status} ${Version}' "$pkg" 2>/dev/null) || continue
+            case $v in installed\ *) v=${v#installed } ;; *) continue ;; esac
+        else
+            v=$(rpm -q --qf '%{VERSION}-%{RELEASE}' "$pkg" 2>/dev/null) || continue
+        fi
+        case $v in
+            *grdusb*) ;;
+            *) echo "$prog: warning: $pkg $v isn't a grd-with-usb-redirect build; a distribution update may have replaced it (see the README)" >&2 ;;
+        esac
+    done
+    return 0
+}
+
 case $cmd in
 enable)
     # Read the password before touching anything, so a bad input changes nothing.
     IFS= read -r password || [ -n "${password:-}" ] || die "no password on stdin"
     [ -n "$password" ] || die "the password is empty"
+    # GDM allows a user only one graphical session, and a headless one never
+    # starts beside a console login.
+    /usr/libexec/grd-with-usb-redirect/grd-headless-check "$user" || exit 1
 
     if getent group rdp-usb-gw >/dev/null; then
         usermod -aG rdp-usb-gw "$user"
@@ -100,6 +121,7 @@ disable)
     echo "Disabled. Lingering is left on; turn it off with: loginctl disable-linger $user"
     ;;
 status)
+    check_patched_builds
     systemctl --no-pager status "$session_unit" || true
     if [ -S "$runtime/bus" ]; then
         as_user systemctl --no-pager --user status gnome-remote-desktop-headless.service || true

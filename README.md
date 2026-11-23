@@ -34,9 +34,35 @@ sudo dnf copr enable wrouesnel/grd-with-usb-redirect
 sudo dnf install grd-with-usb-redirect
 ```
 
-USB redirection also needs the kernel's `vhci_hcd` module. Ubuntu ships it in
-`linux-modules-extra-$(uname -r)`. EL10 kernels don't include it, but ELRepo's `kmod-usbip`
-does.
+USB redirection also needs the kernel's `vhci_hcd` module. Ubuntu 24.04 ships it in
+`linux-modules-extra-$(uname -r)`, and Ubuntu 26.04 in the kernel package itself. EL10
+kernels don't include it, but ELRepo's `kmod-usbip` does.
+
+### Keeping the patched builds
+
+`gdm3` and `gnome-remote-desktop` here are the distribution's packages, rebuilt with a
+`grdusb` revision. They sort above the distribution's build of the same version, but the
+next distribution update of either package sorts above ours, and apt or dnf installs it in
+their place without a word. Then headless sessions no longer start, and USB redirection
+and the fixes below are gone. `grd-headless-session status` warns when that has happened.
+
+On Ubuntu, pin the PPA above the archive, so the patched builds stay until the PPA is
+rebuilt on the new version:
+
+```sh
+sudo tee /etc/apt/preferences.d/grd-with-usb-redirect <<'END'
+Package: *
+Pin: release o=LP-PPA-w-rouesnel-grd-with-usb-redirect
+Pin-Priority: 990
+END
+```
+
+With the pin, an Ubuntu security update to either package reaches pinned machines only once
+the PPA has been rebuilt on it. `packaging/check-updates.sh` compares the versions the
+rebuilds are based on with the distributions' latest.
+
+On EL10, `dnf versionlock add gdm gnome-remote-desktop` (from
+`python3-dnf-plugin-versionlock`) holds them the same way.
 
 ## Setting up a desktop
 
@@ -56,6 +82,14 @@ It reads the RDP password from stdin. The RDP username is the user's name. It:
   `gnome-headless-session@alice.service`.
 
 `--set-account-password` also makes the RDP password the account's password.
+
+**One session per user:** GDM allows a user only one graphical session, so the headless
+session doesn't start for a user who is logged in at the console, or whom GDM's automatic
+or timed login logs in there. `grd-headless-session enable` refuses such a user, and
+`gnome-headless-session@.service` is skipped, with the reason in the journal. Use a different
+user for the console. While a user has a graphical session on a seat, gnome-remote-desktop's
+headless mode doesn't share their desktop, so RDP can't reach the local console.
+
 `grd-headless-session status alice` shows the session and gnome-remote-desktop's settings.
 `grd-headless-session disable --stop alice` turns it off again.
 
@@ -66,6 +100,10 @@ picks the desktop and port for each user.
 **The certificate:** before gnome-remote-desktop starts, `grd-ensure-tls-cert` makes a new
 certificate if there isn't one, if it expires within 30 days, or if the machine's name
 changed. A certificate you configured yourself with `grdctl` is left alone.
+
+On machines without a TPM, each `grdctl` call logs `Init TPM credentials failed because No
+TPM device found, using GKeyFile as fallback`. That's expected: the RDP credentials are kept
+in a file only the user can read instead.
 
 **The lock screen:** `grd-no-lockscreen` sets and locks
 `org.gnome.desktop.screensaver lock-enabled` to false and
@@ -100,6 +138,11 @@ the client offers its devices again to the user's session.
 | grdctl crashed reading credentials from a pipe | Fixed | Fixed | Fixed | [MR 459](https://gitlab.gnome.org/GNOME/gnome-remote-desktop/-/merge_requests/459) |
 | grdctl reads credentials from stdin, not the command line | Backported from 47 | Already there | Already there | In 47 |
 | A client stalling during the TLS handshake could hang the daemon | Socket shutdown backported | Already fixed by Red Hat | Backported | [MR 436](https://gitlab.gnome.org/GNOME/gnome-remote-desktop/-/merge_requests/436) |
+| Headless mode shared the user's console session when no headless session was running | Fixed | Fixed | Fixed | Not submitted yet |
+| An empty TLS certificate path logged "certificate is invalid" | Fixed | Fixed | Fixed | Not submitted yet |
+
+The gdm 46 rebuild also carries upstream's fix for assertion failures that the remote
+display factory logged about local displays (from gdm 47).
 
 ## Layout
 

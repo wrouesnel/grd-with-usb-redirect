@@ -1,0 +1,42 @@
+From e7fcda6d61092019dfe38e322883faa0e193b210 Mon Sep 17 00:00:00 2001
+From: Ray Strode <rstrode@redhat.com>
+Date: Wed, 29 May 2024 12:13:20 -0400
+Subject: [PATCH] remote-display-factory: Don't be so noisy about non-remote
+ displays
+
+GdmRemoteDisplayFactory assumes the displays added and removed are
+remote displays, and gives a warning in the log if that assumption
+fails.
+
+But the remote display factory and local display factory share a
+display store, so that assumption will fail...
+
+This commit changes the g_return_if_fail calls to if () return;
+---
+ daemon/gdm-remote-display-factory.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/daemon/gdm-remote-display-factory.c b/daemon/gdm-remote-display-factory.c
+index 0e47e96cc..deb6d402b 100644
+--- a/daemon/gdm-remote-display-factory.c
++++ b/daemon/gdm-remote-display-factory.c
+@@ -252,7 +252,8 @@ on_display_added (GdmDisplayStore         *store,
+ {
+         GdmDisplay *display = gdm_display_store_lookup (store, id);
+ 
+-        g_return_if_fail (GDM_IS_REMOTE_DISPLAY (display));
++        if (!GDM_IS_REMOTE_DISPLAY (display))
++                return;
+ 
+         factory->remote_displays_count++;
+ 
+@@ -278,7 +279,8 @@ on_display_removed (GdmDisplayStore         *display_store,
+ {
+         g_assert (factory->remote_displays_count >= 0);
+ 
+-        g_return_if_fail (GDM_IS_REMOTE_DISPLAY (display));
++        if (!GDM_IS_REMOTE_DISPLAY (display))
++                return;
+ 
+         factory->remote_displays_count--;
+ 

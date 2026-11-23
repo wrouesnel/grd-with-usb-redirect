@@ -1,0 +1,44 @@
+#!/bin/sh
+# Checks that a user's headless session can start: GDM allows a user only one
+# graphical session, so the user mustn't be logged in on a console (a session
+# with a seat), or set up to be, by GDM's automatic or timed login.
+#
+# Usage: grd-headless-check <user>
+#
+# Exits 0 when the session can start. Otherwise it says why on stderr and
+# exits 78 (EX_CONFIG). gnome-headless-session@.service runs it as an
+# ExecCondition, so the session is skipped rather than restarted in a loop.
+set -eu
+
+[ $# -eq 1 ] || { echo "usage: ${0##*/} <user>" >&2; exit 2; }
+user=$1
+
+refuse() {
+    echo "Not starting a headless session for $user: $*" >&2
+    echo "GDM allows a user only one graphical session. Use a different user for the console, or log $user out of it." >&2
+    exit 78
+}
+
+# GDM's automatic and timed login, from the [daemon] section of custom.conf.
+for conf in /etc/gdm3/custom.conf /etc/gdm/custom.conf; do
+    [ -r "$conf" ] || continue
+    automatic=$(awk -F= -v user="$user" '
+        /^[[:space:]]*\[/ { daemon = ($0 ~ /^[[:space:]]*\[daemon\]/) }
+        !daemon || /^[[:space:]]*#/ || NF < 2 { next }
+        { gsub(/[[:space:]]/, "", $1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); v[$1] = $2 }
+        END {
+            if (tolower(v["AutomaticLoginEnable"]) == "true" && v["AutomaticLogin"] == user) print "automatic"
+            else if (tolower(v["TimedLoginEnable"]) == "true" && v["TimedLogin"] == user) print "timed"
+        }' "$conf")
+    [ -z "$automatic" ] || refuse "GDM's $automatic login logs $user in on the console ($conf)"
+done
+
+# A session on a seat that's still open. A closing one is on its way out.
+sessions=$(loginctl show-user "$user" -p Sessions --value 2>/dev/null || true)
+for id in $sessions; do
+    seat=$(loginctl show-session "$id" -p Seat --value 2>/dev/null || true)
+    state=$(loginctl show-session "$id" -p State --value 2>/dev/null || true)
+    [ -n "$seat" ] && [ "$state" != closing ] &&
+        refuse "$user is logged in on $seat (session $id)"
+done
+exit 0

@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Will Rouesnel <wrouesnel@wrouesnel.com>
+Date: Mon, 23 Nov 2026 13:04:19 +1100
+Subject: [PATCH 20/21] daemon: Don't share a console session in headless mode
+
+The headless daemon runs on the user's session bus, as a user unit
+wanted by gnome-session.target. A user's console session shares that
+bus and that target, so when the headless session isn't running, or
+before it starts, the headless daemon finds the console session's
+mutter and shares it: an RDP client gets the local desktop, and
+whoever is at the console is watched and controlled without knowing.
+
+The mutter can't be traced to its session: with systemd, the shell
+runs in the user's service manager, not in the session's scope. So in
+headless mode, ignore the user's mutter while they have a graphical
+session on a seat. GDM allows a user only one graphical session, so
+it is that session's.
+---
+ src/grd-daemon.c | 82 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 82 insertions(+)
+
+diff --git a/src/grd-daemon.c b/src/grd-daemon.c
+index 50bcd3d..c3211b3 100644
+--- a/src/grd-daemon.c
++++ b/src/grd-daemon.c
+@@ -44,6 +44,7 @@
+ #include "grd-vnc-server.h"
+ 
+ #ifdef HAVE_LIBSYSTEMD
++#include <systemd/sd-login.h>
+ #include "grd-daemon-handover.h"
+ #include "grd-daemon-system.h"
+ #endif /* HAVE_LIBSYSTEMD */
+@@ -735,6 +736,81 @@ on_mutter_screen_cast_proxy_acquired (GObject      *object,
+   g_signal_emit (daemon, signals[MUTTER_PROXY_ACQUIRED], 0);
+ }
+ 
++/*
++ * A headless daemon shares only headless sessions. A user's console session
++ * runs on the same session bus as their headless session, and with systemd
++ * its shell runs in the user's service manager rather than in the session, so
++ * the mutter found on the bus can't be traced to a session. Instead, never
++ * share the user's mutter while they have a graphical session on a seat.
++ */
++static gboolean
++is_name_owner_allowed (GrdDaemon       *daemon,
++                       GDBusConnection *connection,
++                       const char      *name,
++                       const char      *name_owner)
++{
++#ifdef HAVE_LIBSYSTEMD
++  GrdDaemonPrivate *priv = grd_daemon_get_instance_private (daemon);
++  g_autoptr (GVariant) result = NULL;
++  g_autoptr (GError) error = NULL;
++  g_auto (GStrv) sessions = NULL;
++  uint32_t uid;
++  int n_sessions;
++  int i;
++
++  if (grd_context_get_runtime_mode (priv->context) != GRD_RUNTIME_MODE_HEADLESS)
++    return TRUE;
++
++  result = g_dbus_connection_call_sync (connection,
++                                        "org.freedesktop.DBus",
++                                        "/org/freedesktop/DBus",
++                                        "org.freedesktop.DBus",
++                                        "GetConnectionUnixUser",
++                                        g_variant_new ("(s)", name_owner),
++                                        G_VARIANT_TYPE ("(u)"),
++                                        G_DBUS_CALL_FLAGS_NONE,
++                                        -1, NULL, &error);
++  if (!result)
++    {
++      g_warning ("Not using %s: can't tell whose it is: %s",
++                 name, error->message);
++      return FALSE;
++    }
++  g_variant_get (result, "(u)", &uid);
++
++  n_sessions = sd_uid_get_sessions ((uid_t) uid, 0, &sessions);
++  if (n_sessions < 0)
++    {
++      g_warning ("Not using %s: can't list the sessions of user %u: %s",
++                 name, uid, g_strerror (-n_sessions));
++      return FALSE;
++    }
++
++  for (i = 0; i < n_sessions; i++)
++    {
++      g_autofree char *seat = NULL;
++      g_autofree char *type = NULL;
++      g_autofree char *state = NULL;
++
++      if (sd_session_get_seat (sessions[i], &seat) < 0 || !seat || !*seat)
++        continue;
++      if (sd_session_get_type (sessions[i], &type) < 0 ||
++          (g_strcmp0 (type, "wayland") != 0 && g_strcmp0 (type, "x11") != 0))
++        continue;
++      if (sd_session_get_state (sessions[i], &state) >= 0 &&
++          g_strcmp0 (state, "closing") == 0)
++        continue;
++
++      g_warning ("Not using %s: user %u has graphical session %s on seat %s, "
++                 "and a headless server shares only headless sessions",
++                 name, uid, sessions[i], seat);
++      return FALSE;
++    }
++#endif /* HAVE_LIBSYSTEMD */
++
++  return TRUE;
++}
++
+ static void
+ on_mutter_remote_desktop_name_appeared (GDBusConnection *connection,
+                                         const char      *name,
+@@ -744,6 +820,9 @@ on_mutter_remote_desktop_name_appeared (GDBusConnection *connection,
+   GrdDaemon *daemon = user_data;
+   GrdDaemonPrivate *priv = grd_daemon_get_instance_private (daemon);
+ 
++  if (!is_name_owner_allowed (daemon, connection, name, name_owner))
++    return;
++
+   grd_dbus_mutter_remote_desktop_proxy_new (connection,
+                                             G_DBUS_PROXY_FLAGS_NONE,
+                                             MUTTER_REMOTE_DESKTOP_BUS_NAME,
+@@ -775,6 +854,9 @@ on_mutter_screen_cast_name_appeared (GDBusConnection *connection,
+   GrdDaemon *daemon = user_data;
+   GrdDaemonPrivate *priv = grd_daemon_get_instance_private (daemon);
+ 
++  if (!is_name_owner_allowed (daemon, connection, name, name_owner))
++    return;
++
+   grd_dbus_mutter_screen_cast_proxy_new (connection,
+                                          G_DBUS_PROXY_FLAGS_NONE,
+                                          MUTTER_SCREEN_CAST_BUS_NAME,

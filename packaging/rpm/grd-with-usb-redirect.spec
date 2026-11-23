@@ -1,5 +1,5 @@
 Name:           grd-with-usb-redirect
-Version:        0.1.0
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        GNOME remote desktop with USB redirection, for RDP gateways
 License:        MIT OR Apache-2.0
@@ -63,6 +63,9 @@ install -D -m 0755 headless-session/grd-headless-session %{buildroot}%{_sbindir}
 install -D -m 0755 headless-session/grd-ensure-tls-cert %{buildroot}%{_libexecdir}/grd-with-usb-redirect/grd-ensure-tls-cert
 install -D -m 0644 headless-session/gnome-remote-desktop-headless.service.d/50-grd-tls-cert.conf \
     %{buildroot}%{_userunitdir}/gnome-remote-desktop-headless.service.d/50-grd-tls-cert.conf
+install -D -m 0755 headless-session/grd-headless-check %{buildroot}%{_libexecdir}/grd-with-usb-redirect/grd-headless-check
+install -D -m 0644 headless-session/gnome-headless-session@.service.d/50-grd-console-check.conf \
+    %{buildroot}%{_unitdir}/gnome-headless-session@.service.d/50-grd-console-check.conf
 install -D -m 0644 no-lockscreen/50-grd-no-lockscreen %{buildroot}%{_sysconfdir}/dconf/db/local.d/50-grd-no-lockscreen
 install -D -m 0644 no-lockscreen/50-grd-no-lockscreen.locks %{buildroot}%{_sysconfdir}/dconf/db/local.d/locks/50-grd-no-lockscreen
 
@@ -81,6 +84,7 @@ dconf update || :
 %{_sbindir}/grd-headless-session
 %{_libexecdir}/grd-with-usb-redirect/
 %{_userunitdir}/gnome-remote-desktop-headless.service.d/50-grd-tls-cert.conf
+%{_unitdir}/gnome-headless-session@.service.d/50-grd-console-check.conf
 
 %files -n grd-no-lockscreen
 %license LICENSE-APACHE LICENSE-MIT
@@ -88,5 +92,11 @@ dconf update || :
 %config(noreplace) %{_sysconfdir}/dconf/db/local.d/locks/50-grd-no-lockscreen
 
 %changelog
+* Mon Nov 23 2026 Will Rouesnel <wrouesnel@wrouesnel.com> - 0.2.0-1
+- Don't start a headless session for a user on the console, or set up for
+  GDM's automatic login: skip it, with the reason, rather than restart it in a loop.
+- grd-headless-session status warns when gdm or gnome-remote-desktop isn't
+  this project's build.
+
 * Thu Nov 19 2026 Will Rouesnel <wrouesnel@wrouesnel.com> - 0.1.0-1
 - First package.
