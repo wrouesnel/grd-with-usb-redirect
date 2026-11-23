@@ -94,8 +94,15 @@ It reads the RDP password from stdin. The RDP username is the user's name. It:
 session doesn't start for a user who is logged in at the console, or whom GDM's automatic
 or timed login logs in there. `grd-headless-session enable` refuses such a user, and
 `gnome-headless-session@.service` is skipped, with the reason in the journal. Use a different
-user for the console. While a user has a graphical session on a seat, gnome-remote-desktop's
-headless mode doesn't share their desktop, so RDP can't reach the local console.
+user for the console.
+
+gnome-remote-desktop's headless mode never shares the console's desktop. It places the shell
+by the logind session of its process: a shell in a graphical session on a seat is refused,
+and a shell in a session without a seat is shared. A shell in no session, such as one that
+the user's systemd runs, can't be told apart from the console's, so it's refused while the
+user has a graphical session on a seat. A headless shell you start in its own seatless
+session, for example from a system unit with `PAMName=`, can therefore run beside the same
+user's console session.
 
 `grd-headless-session status alice` shows the session and gnome-remote-desktop's settings.
 `grd-headless-session disable --stop alice` turns it off again.
