@@ -24,8 +24,21 @@ package, so you can install only the parts you want.
 
 ```sh
 sudo add-apt-repository ppa:w-rouesnel/grd-with-usb-redirect
+sudo tee /etc/apt/preferences.d/grd-with-usb-redirect.pref <<'END'
+Package: *
+Pin: release o=LP-PPA-w-rouesnel-grd-with-usb-redirect
+Pin-Priority: 990
+END
+sudo apt update
 sudo apt install grd-with-usb-redirect
 ```
+
+The second command pins the PPA above the Ubuntu archive (see
+[Keeping the patched builds](#keeping-the-patched-builds)). The `grd-with-usb-redirect`
+package installs the same file and keeps it from then on, but the pin has to be in place
+before the first install. Otherwise, while an Ubuntu update to `gdm3` or
+`gnome-remote-desktop` is newer than the PPA's rebuild, apt picks Ubuntu's package and the
+install fails or lacks USB redirection.
 
 **AlmaLinux, Rocky Linux and RHEL 10:**
 
@@ -46,16 +59,10 @@ next distribution update of either package sorts above ours, and apt or dnf inst
 their place without a word. Then headless sessions no longer start, and USB redirection
 and the fixes below are gone. `grd-headless-session status` warns when that has happened.
 
-On Ubuntu, pin the PPA above the archive, so the patched builds stay until the PPA is
-rebuilt on the new version:
-
-```sh
-sudo tee /etc/apt/preferences.d/grd-with-usb-redirect <<'END'
-Package: *
-Pin: release o=LP-PPA-w-rouesnel-grd-with-usb-redirect
-Pin-Priority: 990
-END
-```
+On Ubuntu, the pin set up under [Installing](#installing) prefers the PPA's builds over the
+archive's, so the patched builds stay until the PPA is rebuilt on the new version. The
+`grd-with-usb-redirect` package owns it, as `/etc/apt/preferences.d/grd-with-usb-redirect.pref`;
+if you install only some of the packages, keep the file yourself.
 
 With the pin, an Ubuntu security update to either package reaches pinned machines only once
 the PPA has been rebuilt on it. `packaging/check-updates.sh` compares the versions the

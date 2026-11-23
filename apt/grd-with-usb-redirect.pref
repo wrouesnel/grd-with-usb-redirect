@@ -1,0 +1,3 @@
+Package: *
+Pin: release o=LP-PPA-w-rouesnel-grd-with-usb-redirect
+Pin-Priority: 990

@@ -25,6 +25,10 @@ Description: GNOME remote desktop with USB redirection, for RDP gateways
     redirection channel
   - grd-headless-session, to start a user's session at boot
   - grd-no-lockscreen, to turn off GNOME's lock screen
+ .
+ It also pins this PPA above the Ubuntu archive, so an Ubuntu update doesn't
+ replace the patched gdm3 and gnome-remote-desktop builds before the PPA is
+ rebuilt on it.
 
 Package: grd-headless-session
 Architecture: all

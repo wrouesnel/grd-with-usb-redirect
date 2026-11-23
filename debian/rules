@@ -3,6 +3,8 @@
 	dh $@
 
 override_dh_auto_install:
+	install -D -m 0644 apt/grd-with-usb-redirect.pref \
+	  debian/grd-with-usb-redirect/etc/apt/preferences.d/grd-with-usb-redirect.pref
 	install -D -m 0755 headless-session/grd-headless-session \
 	  debian/grd-headless-session/usr/sbin/grd-headless-session
 	install -D -m 0755 headless-session/grd-ensure-tls-cert \
